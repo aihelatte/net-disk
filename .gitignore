@@ -1,0 +1,43 @@
+# Local agent/editor state
+.agents/
+.codex/
+.vscode/
+.idea/
+
+# Local runtime configuration (track only *.example templates)
+code/client/config/client.conf
+code/server/config/server.conf
+.env
+.env.*
+!.env.example
+
+# Build outputs
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+code/client/client
+code/server/server
+
+# Runtime files and generated test data
+code/client/upload/*
+!code/client/upload/.gitkeep
+code/client/download/*
+!code/client/download/.gitkeep
+code/server/NetDisk/*
+!code/server/NetDisk/.gitkeep
+*.log
+core
+core.*
+vgcore.*
+
+# Local demonstration/reference materials are not source artifacts
+网盘项目示例/
+网盘图片/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

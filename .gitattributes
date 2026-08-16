@@ -1,0 +1,16 @@
+* text=auto
+
+*.c text eol=lf
+*.h text eol=lf
+Makefile text eol=lf
+*.md text eol=lf
+*.example text eol=lf
+*.sh text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.pptx binary
+*.gz binary
