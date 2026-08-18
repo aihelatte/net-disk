@@ -21,6 +21,10 @@ code/server/config/server.conf
 code/client/client
 code/server/server
 
+# Server-local third-party dependency restored from the course archive
+/code/l8w8jwt/
+/code/l8w8jwt-2.0.0-linux-x86_64.tar.gz
+
 # Runtime files and generated test data
 code/client/upload/*
 !code/client/upload/.gitkeep

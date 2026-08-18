@@ -30,6 +30,20 @@ export NET_DISK_DB_PASSWORD='服务器本地密码'
 export NET_DISK_DB_NAME=net_disk
 ```
 
+## Linux 构建依赖
+
+客户端和服务端共用项目内公共头文件 `code/include/myhead.h`。服务端还需要兼容 MySQL C API 的开发头文件和链接库；在 CentOS 7 上由 `mariadb-devel` 提供。
+
+Token 功能使用课程配套的 `l8w8jwt-2.0.0-linux-x86_64.tar.gz`。该第三方压缩包和预编译静态库不纳入 Git，应在 Linux 服务器上解压为：
+
+```text
+code/l8w8jwt/
+├── include/l8w8jwt/
+└── bin/release/
+```
+
+两个 Makefile 会从该目录读取 l8w8jwt 头文件和静态库，不需要把 `.a` 文件复制到系统 `/usr/lib`。
+
 ## 当前状态
 
-当前提交用于保存经过敏感信息清理的原 C 项目基线。项目仍缺少 `myhead.h`、完整的 l8w8jwt 依赖说明和 MySQL 建表脚本，因此尚未宣称可以构建或运行。后续将在实验室服务器上补齐环境并记录验证结果。
+当前分支正在恢复 Linux 构建和运行基线。项目尚未完成服务器编译、数据库初始化和端到端验证，因此尚未宣称可以构建或运行。

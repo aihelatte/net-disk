@@ -4,11 +4,13 @@ SRCS:=$(wildcard *.c)#拿到当前目录下所有的.c文件
 OBJS:=$(patsubst %.c,%.o,$(SRCS))#把.c文件替换为.o文件
 #预定义变量
 CC:=gcc
-#CFLAGS:=-g
+CPPFLAGS:=-I../include
+CFLAGS:=-g
+LDFLAGS:=-L../l8w8jwt/bin/release
 $(out):$(OBJS)
-	$(CC) $^ -o $@  -pthread -lcrypt -lmysqlclient -ll8w8jwt -lmbedcrypto -lmbedx509 -g
+	$(CC) $^ -o $@ $(LDFLAGS) -pthread -lcrypt -lmysqlclient -ll8w8jwt -lmbedcrypto -lmbedx509 -g
 %.o:%.c
-	$(CC) -c $^ -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $^ -o $@
 
 #.PHONY:clean rebuild
 rebuild:clean $(out)
