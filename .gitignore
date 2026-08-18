@@ -41,6 +41,9 @@ vgcore.*
 网盘项目示例/
 网盘图片/
 
+# Local project notes (already tracked docs remain tracked)
+/docs/
+
 # OS metadata
 .DS_Store
 Thumbs.db
