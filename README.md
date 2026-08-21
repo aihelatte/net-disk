@@ -19,16 +19,17 @@ Linux C 语言网盘课程项目的原版修复与复习仓库。
 ```bash
 cp code/server/config/server.conf.example code/server/config/server.conf
 cp code/client/config/client.conf.example code/client/config/client.conf
+cp code/server/config/database.env.example code/server/config/database.env
 ```
 
-服务端数据库连接读取以下环境变量：
+将 `code/server/config/database.env` 的权限设为 `600`，填入服务器本地密码后加载：
 
 ```bash
-export NET_DISK_DB_HOST=localhost
-export NET_DISK_DB_USER=net_disk_app
-export NET_DISK_DB_PASSWORD='服务器本地密码'
-export NET_DISK_DB_NAME=net_disk
+chmod 600 code/server/config/database.env
+source code/server/config/database.env
 ```
+
+服务端会从该文件导出的环境变量中读取数据库地址、账号、密码和库名。真实的 `database.env` 仅保留在服务器，由 `.gitignore` 排除。
 
 ## Linux 构建依赖
 

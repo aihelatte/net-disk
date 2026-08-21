@@ -7,9 +7,9 @@
 # Local runtime configuration (track only *.example templates)
 code/client/config/client.conf
 code/server/config/server.conf
+code/server/config/database.env
 .env
 .env.*
-!.env.example
 
 # Build outputs
 *.o
