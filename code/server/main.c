@@ -1,8 +1,92 @@
 #include "threadPool.h"
 #include "worker.h"
+#include "protocol_validate.h"
 #define NUM 3       //线程池中子线程数量，固定为3
 
 int exitPipe[2];
+
+static int is_valid_train_header(const train_state_t *pTrain)
+{
+    if(!protocol_valid_text_length(pTrain->length, sizeof(pTrain->buf)) ||
+       pTrain->state < REGISTER || pTrain->state > TOKEN ||
+       !protocol_valid_pre_length(pTrain->length, pTrain->pre_length))
+    {
+        return 0;
+    }
+
+    switch(pTrain->state)
+    {
+    case REGISTER:
+    case LOGIN:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_USER_NAME_CAPACITY) &&
+               pTrain->length > 0 && pTrain->pre_length == 0;
+    case LS:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_COMMAND_CAPACITY) &&
+               pTrain->length >= 2 && pTrain->pre_length == 2;
+    case CD:
+    case REMOVE:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_COMMAND_CAPACITY) &&
+               pTrain->length > 3 && pTrain->pre_length == 2;
+    case PWD:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_COMMAND_CAPACITY) &&
+               pTrain->length == 3 && pTrain->pre_length == 3;
+    case MKDIR:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_COMMAND_CAPACITY) &&
+               pTrain->length > 6 && pTrain->pre_length == 5;
+    case GETS:
+    case PUTS:
+        return protocol_valid_text_length(pTrain->length,
+                                          PROTOCOL_COMMAND_CAPACITY) &&
+               pTrain->length > 5 && pTrain->pre_length == 4;
+    case TOKEN:
+        return protocol_valid_split_text(pTrain->length,
+                                         pTrain->pre_length,
+                                         PROTOCOL_USER_NAME_CAPACITY,
+                                         PROTOCOL_TOKEN_CAPACITY);
+    default:
+        return 0;
+    }
+}
+
+static int is_valid_train_body(const train_state_t *pTrain)
+{
+    switch(pTrain->state)
+    {
+    case REGISTER:
+    case LOGIN:
+    case TOKEN:
+        return 1;
+    case LS:
+        return strncmp(pTrain->buf, "ls", 2) == 0 &&
+               (pTrain->length == 2 || pTrain->buf[2] == ' ');
+    case CD:
+        return strncmp(pTrain->buf, "cd ", 3) == 0;
+    case PWD:
+        return strcmp(pTrain->buf, "pwd") == 0;
+    case REMOVE:
+        return strncmp(pTrain->buf, "rm ", 3) == 0;
+    case MKDIR:
+        return strncmp(pTrain->buf, "mkdir ", 6) == 0;
+    case GETS:
+        return strncmp(pTrain->buf, "gets ", 5) == 0;
+    case PUTS:
+        return strncmp(pTrain->buf, "puts ", 5) == 0;
+    default:
+        return 0;
+    }
+}
+
+static void close_invalid_connection(int netFd, int epfd, const char *reason)
+{
+    fprintf(stderr, "Invalid protocol message: fd=%d, reason=%s\n", netFd, reason);
+    epollDel(netFd, epfd);
+    close(netFd);
+}
 void sigFunc(int signum)
 {
     // printf("signum = %d\n", signum);
@@ -120,9 +204,25 @@ int main(int argc, char *argv[])
                     close(netFd);
                     break;
                 }
+                if(!protocol_valid_text_length(train_get.length, sizeof(train_get.buf)))
+                {
+                    close_invalid_connection(netFd, epfd, "invalid length");
+                    continue;
+                }
                 recvn(netFd, &train_get.state, sizeof(int));
                 recvn(netFd, &train_get.pre_length, sizeof(int));
+                if(!is_valid_train_header(&train_get))
+                {
+                    close_invalid_connection(netFd, epfd, "invalid header fields");
+                    continue;
+                }
                 recvn(netFd, train_get.buf, train_get.length);
+                train_get.buf[train_get.length] = '\0';
+                if(!is_valid_train_body(&train_get))
+                {
+                    close_invalid_connection(netFd, epfd, "state and body mismatch");
+                    continue;
+                }
                 // printf("train.buf = %s\n", train_get.buf);
 
                 switch(train_get.state)
