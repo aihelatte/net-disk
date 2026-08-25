@@ -126,7 +126,11 @@ int main(int argc, char *argv[])
 
     // 创建客户队列并初始化
     clientQueue_t clientQueue;
-    init_clientQueue(&clientQueue);
+    if(init_clientQueue(&clientQueue) != 0)
+    {
+        fprintf(stderr, "Failed to initialize client queue.\n");
+        return EXIT_FAILURE;
+    }
 
     // 初始化本地文件表（用于秒传），确保数据库信息和本地信息一致
     init_local_file();
@@ -166,6 +170,17 @@ int main(int argc, char *argv[])
             if (readyArr[i].data.fd == sockFd)// 监听到建立连接请求
             {
                 int netFd = accept(sockFd, NULL, NULL);
+                if(netFd == -1)
+                {
+                    perror("accept");
+                    continue;
+                }
+                if((size_t)netFd >= clientQueue.fd_capacity)
+                {
+                    fprintf(stderr, "File descriptor is out of range: fd=%d\n", netFd);
+                    close(netFd);
+                    continue;
+                }
                 // 将连接加入监听
                 epollAdd(netFd, epfd);
             }

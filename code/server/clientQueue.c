@@ -1,20 +1,44 @@
 #include"threadPool.h"
 #include "worker.h"
+#include <sys/resource.h>
 
 //初始化客户队列
 int init_clientQueue(clientQueue_t *pclientQueue)
 {
+    struct rlimit fdLimit;
+    if(getrlimit(RLIMIT_NOFILE, &fdLimit) == -1)
+    {
+        perror("getrlimit");
+        return -1;
+    }
+    if(fdLimit.rlim_cur == RLIM_INFINITY || fdLimit.rlim_cur == 0)
+    {
+        fprintf(stderr, "Invalid file descriptor limit.\n");
+        return -1;
+    }
+
+    pclientQueue->fd_capacity = (size_t)fdLimit.rlim_cur;
+    pclientQueue->client = calloc(pclientQueue->fd_capacity, sizeof(int));
+    pclientQueue->index = calloc(pclientQueue->fd_capacity, sizeof(int));
+    if(pclientQueue->client == NULL || pclientQueue->index == NULL)
+    {
+        free(pclientQueue->client);
+        free(pclientQueue->index);
+        return -1;
+    }
+
     pclientQueue->timer = 0;
     //初始化客户端数组的usr_id
-    memset(pclientQueue->client, -1, sizeof(pclientQueue->client));
+    memset(pclientQueue->client, -1, pclientQueue->fd_capacity * sizeof(int));
     //初始化哈希表，内容为netfd对于所在循环队列的位置
-    memset(pclientQueue->index, 0, sizeof(pclientQueue->index));
+    memset(pclientQueue->index, 0, pclientQueue->fd_capacity * sizeof(int));
     for(int i = 0; i < TIME_SLICE; ++i)//初始化循环队列里面的集合（队列） 
     {
         pclientQueue->time_out[i].head = NULL;
         pclientQueue->time_out[i].tail = NULL;
         pclientQueue->time_out[i].size = 0;
     }
+    return 0;
 }
 
 //事件加入集合

@@ -5,7 +5,6 @@
 #define MD5_SIZE 16
 #define MD5_STR_LEN (MD5_SIZE * 2)
 #define SATL_LEN 14// 盐值长度
-#define CLIENT_NUM 50// 客户端表大小
 #define TIME_SLICE 300// 时间片大小
 //tlv协议数据单元
 typedef struct tain_s{
@@ -49,9 +48,10 @@ typedef struct slotList_s {
 } slotList_t;
 
 typedef struct clientQueue_s{// 已连接客户队列
-    int client[CLIENT_NUM];// 用于记录每个客户端的user_id
+    int *client;// 用于记录每个客户端的user_id
     slotList_t time_out[TIME_SLICE];// 循环队列，服务于时间轮转算法
-    int index[CLIENT_NUM];// 每个netFd当前在轮盘循环队列的位置，下标netFd对应
+    int *index;// 每个netFd当前在轮盘循环队列的位置，下标netFd对应
+    size_t fd_capacity;// client和index能够容纳的fd数量
     int timer;// 记录当前所在循环队列位置的下标
 } clientQueue_t;
 
