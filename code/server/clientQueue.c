@@ -69,30 +69,31 @@ int fdDel(int netFd, clientQueue_t *pclientQueue)
     int index = pclientQueue->index[netFd];
     pclientQueue->index[netFd] = 0;// 重设为0
     slotNode_t *cur = pclientQueue->time_out[index].head;
-    slotNode_t *pre = cur;
-    if(cur == NULL)// 可能已经为空
+    slotNode_t *pre = NULL;
+    while(cur != NULL)
     {
-        return 0;
-    }
-    if(cur->netFd == netFd)     //开头第一个的情况
-    {
-        pclientQueue->time_out[index].head = cur->next;
-        free(cur);
-        --pclientQueue->time_out[index].size;
-    }
-    else
-    {
-        while(cur != NULL)
+        if(cur->netFd == netFd)
         {
-            if (cur->netFd == netFd)
+            if(pre == NULL)// 删除头节点
+            {
+                pclientQueue->time_out[index].head = cur->next;
+            }
+            else// 删除中间节点或尾节点
             {
                 pre->next = cur->next;
-                free(cur);
-                --pclientQueue->time_out[index].size;
-                break;
             }
-            pre = cur;
-            cur = cur->next;
+
+            if(pclientQueue->time_out[index].tail == cur)// 删除尾节点
+            {
+                pclientQueue->time_out[index].tail = pre;
+            }
+
+            free(cur);
+            --pclientQueue->time_out[index].size;
+            return 0;
         }
+        pre = cur;
+        cur = cur->next;
     }
+    return 0;
 }
