@@ -54,8 +54,12 @@ int handle_long_cmd(int netFd, int user_id)
     // 接收命令
     char cmd[100] = {0};
     int datalength;
-    recvn(netFd, &datalength, sizeof(datalength));
-    recvn(netFd, cmd, datalength);
+    if(recvn(netFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
+       datalength < 0 ||
+       recvn(netFd, cmd, datalength) != datalength)
+    {
+        return EXIT_FAILURE;
+    }
     sysadd(user_id, cmd);
     
     // printf("cmd = %s\n", cmd);
@@ -76,4 +80,5 @@ int handle_long_cmd(int netFd, int user_id)
         // printf("file = %s\n", file);
         Upload(netFd, file, user_id);
     }
+    return 0;
 }

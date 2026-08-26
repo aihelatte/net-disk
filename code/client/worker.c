@@ -62,7 +62,11 @@ int handle_long_cmd(server_t *pserver)
         train_state.length = strlen(train_state.buf);
         train_state.pre_length = strlen(pserver->user_name);
         send(sockFd_child, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
-        recvn(sockFd_child, &check, sizeof(check));
+        if(recvn(sockFd_child, &check, sizeof(check)) != sizeof(check))
+        {
+            close(sockFd_child);
+            return -1;
+        }
         if(check == 0)
         {
             // 验证成功退出

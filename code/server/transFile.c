@@ -5,19 +5,31 @@
 int recvn(int sockFd, void *pstart, int len)
 {
     int total = 0;
-    int ret;
     char *p = (char*)pstart;
+    if(len < 0)
+    {
+        return -1;
+    }
     while(total < len)// 收完为止
     {
-        ret = recv(sockFd, p + total, len - total, 0);
-        if(ret == 0)// 进来说明没收完，没收完返回值却是0则说明对面断开了，可以退出
+        int ret = recv(sockFd, p + total, len - total, 0);
+        if(ret > 0)
         {
-            return 0;
+            total += ret;
+            continue;
         }
-        ERROR_CHECK(ret, -1, "recv");
-        total += ret;
+        if(ret == 0)// 对端断开，返回实际收到的字节数
+        {
+            return total;
+        }
+        if(errno == EINTR)
+        {
+            continue;
+        }
+        perror("recv");
+        return -1;
     }
-    return 0;
+    return total;
 }
 
 int Upload(int netFd, char *file, int user_id)
@@ -62,7 +74,11 @@ int Upload(int netFd, char *file, int user_id)
 
     // 获得文件已传大小
     int exitSize = 0;
-    recvn(netFd, &exitSize, sizeof(exitSize));
+    if(recvn(netFd, &exitSize, sizeof(exitSize)) != sizeof(exitSize))
+    {
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
     // 发送文件内容
     // 判断文件大小，大文件用一次性传输
@@ -101,7 +117,11 @@ int Upload(int netFd, char *file, int user_id)
 
     close(fd);
     int total_time;
-    recvn(netFd, &total_time, sizeof(int));
+    if(recvn(netFd, &total_time, sizeof(int)) != sizeof(int))
+    {
+        munmap(p, fileSize);
+        return EXIT_FAILURE;
+    }
     printf("total time = %ds\n",total_time);
     munmap(p, fileSize);
     return 0;
@@ -112,25 +132,43 @@ int Download(int sockFd, int user_id)
     // 先获取文件名，不同客户端传的文件可能文件名相同但文件内容不同，所以根据md5值来判断本地是否有该文件
     char name[1024] = {0};
     int dataLength;
-    recvn(sockFd, &dataLength, sizeof(int));// 文件内容还够时一直将length长度的文件都收完
-    if(dataLength == 0)
+    if(recvn(sockFd, &dataLength, sizeof(int)) != sizeof(int))// 文件内容还够时一直将length长度的文件都收完
+    {
+        return EXIT_FAILURE;
+    }
+    if(dataLength <= 0)
     {
         return EXIT_FAILURE;// 打开文件错误退出
     }
-    recvn(sockFd, name, dataLength);
+    if(recvn(sockFd, name, dataLength) != dataLength)
+    {
+        return EXIT_FAILURE;
+    }
     printf("name = %s\n", name);
     
     // 获取文件大小
     int fileSize;
-    recvn(sockFd, &dataLength, sizeof(int));
-    recvn(sockFd, &fileSize, dataLength);
+    if(recvn(sockFd, &dataLength, sizeof(int)) != sizeof(int) ||
+       dataLength < 0 ||
+       recvn(sockFd, &fileSize, dataLength) != dataLength)
+    {
+        return EXIT_FAILURE;
+    }
 
     // 获取文件md5值
     char md5_str[MD5_STR_LEN + 1] = {0};
-    recvn(sockFd, &dataLength, sizeof(int));
-    recvn(sockFd, md5_str, dataLength);
+    if(recvn(sockFd, &dataLength, sizeof(int)) != sizeof(int) ||
+       dataLength < 0 ||
+       recvn(sockFd, md5_str, dataLength) != dataLength)
+    {
+        return EXIT_FAILURE;
+    }
 
     // 获取当前目录id
+    if(fileSize < 0)
+    {
+        return EXIT_FAILURE;
+    }
     int code;
     get_user_code(user_id, &code);
 
@@ -223,7 +261,12 @@ int Download(int sockFd, int user_id)
         char *p = (char *)mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         ERROR_CHECK(p, MAP_FAILED, "mmap");
         //直接拷贝到文件映射的内存空间
-        recvn(sockFd, p, fileSize);
+        if(recvn(sockFd, p, fileSize) != fileSize)
+        {
+            munmap(p, fileSize);
+            close(fd);
+            return EXIT_FAILURE;
+        }
         munmap(p, fileSize);
         timeEnd = time(NULL);
     }
@@ -247,7 +290,11 @@ int Download(int sockFd, int user_id)
                 printf("total time = %ds\n", total_time);
                 return EXIT_FAILURE;
             }
-            recvn(sockFd, buf, dataLength);
+            if(dataLength < 0 || recvn(sockFd, buf, dataLength) != dataLength)
+            {
+                close(fd);
+                return EXIT_FAILURE;
+            }
             //写到文件对象中
             write(fd, buf, dataLength);
         }

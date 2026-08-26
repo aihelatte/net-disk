@@ -56,8 +56,12 @@ int register_user(train_state_t train_get, int netFd)
     // 收取密文
     int datalength;
     char crptpasswd[50] = {0};
-    recvn(netFd, &datalength, sizeof(datalength));
-    recvn(netFd, crptpasswd, datalength);
+    if(recvn(netFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
+       datalength < 0 ||
+       recvn(netFd, crptpasswd, datalength) != datalength)
+    {
+        return EXIT_FAILURE;
+    }
 
     char pwd[100] = "~/";// pwd!!
 
@@ -133,8 +137,12 @@ int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
         // 接收客户端生成的密文
         int datalength;
         char crptpasswd_client[50] = {0};
-        recvn(netFd, &datalength, sizeof(int));
-        recvn(netFd, crptpasswd_client, datalength);
+        if(recvn(netFd, &datalength, sizeof(int)) != sizeof(int) ||
+           datalength < 0 ||
+           recvn(netFd, crptpasswd_client, datalength) != datalength)
+        {
+            return EXIT_FAILURE;
+        }
 
         if(strncmp(crptpasswd, crptpasswd_client, 49) != 0)// 只比较前49位
         {

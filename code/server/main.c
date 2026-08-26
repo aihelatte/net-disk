@@ -224,14 +224,22 @@ int main(int argc, char *argv[])
                     close_invalid_connection(netFd, epfd, "invalid length");
                     continue;
                 }
-                recvn(netFd, &train_get.state, sizeof(int));
-                recvn(netFd, &train_get.pre_length, sizeof(int));
+                if(recvn(netFd, &train_get.state, sizeof(int)) != sizeof(int) ||
+                   recvn(netFd, &train_get.pre_length, sizeof(int)) != sizeof(int))
+                {
+                    close_invalid_connection(netFd, epfd, "incomplete message header");
+                    continue;
+                }
                 if(!is_valid_train_header(&train_get))
                 {
                     close_invalid_connection(netFd, epfd, "invalid header fields");
                     continue;
                 }
-                recvn(netFd, train_get.buf, train_get.length);
+                if(recvn(netFd, train_get.buf, train_get.length) != train_get.length)
+                {
+                    close_invalid_connection(netFd, epfd, "incomplete message body");
+                    continue;
+                }
                 train_get.buf[train_get.length] = '\0';
                 if(!is_valid_train_body(&train_get))
                 {

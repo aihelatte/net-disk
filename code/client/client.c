@@ -63,7 +63,12 @@ int main()
         if(flag == 1)
         {
             int ret = register_user(sockFd);
-            if(ret == 1)
+            if(ret == -1)
+            {
+                close(sockFd);
+                return EXIT_FAILURE;
+            }
+            else if(ret == 1)
             {
                 printf("\033[1;31mregister failed!\033[0m\n");
                 continue;
@@ -82,7 +87,12 @@ int main()
         else if(flag == 2)
         {
             int ret = login(sockFd, uName);
-            if(ret == 2)// 用户未注册
+            if(ret == -1)
+            {
+                close(sockFd);
+                return EXIT_FAILURE;
+            }
+            else if(ret == 2)// 用户未注册
             {
                 printf("\033[1;33mUnregistered user!\033[0m\n");
                 continue;
@@ -110,15 +120,30 @@ int main()
     char token[1024] = {0};
     char key[100] = {0};
     int datalength;
-    recvn(sockFd, &datalength, sizeof(int));
-    recvn(sockFd, token, datalength);
-    recvn(sockFd, &datalength, sizeof(int));
-    recvn(sockFd, key, datalength);
+    if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int) ||
+       datalength < 0 ||
+       recvn(sockFd, token, datalength) != datalength)
+    {
+        close(sockFd);
+        return EXIT_FAILURE;
+    }
+    if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int) ||
+       datalength < 0 ||
+       recvn(sockFd, key, datalength) != datalength)
+    {
+        close(sockFd);
+        return EXIT_FAILURE;
+    }
 
     // 记录当前目录，刚登陆默认在家目录
     char pwd[1024] = {0};
-    recvn(sockFd, &datalength, sizeof(int));
-    recvn(sockFd, pwd, datalength);
+    if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int) ||
+       datalength < 0 ||
+       recvn(sockFd, pwd, datalength) != datalength)
+    {
+        close(sockFd);
+        return EXIT_FAILURE;
+    }
 
     // 服务端保存token和key
     server_t server;
@@ -184,15 +209,27 @@ int main()
                     train_state.pre_length = 2;
                     send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
-                    recvn(sockFd, &check, sizeof(int));
+                    if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     if (check != 0)
                     {
                         printf("\033[1;31mWrong dir name!\033[0m\n");
                         continue;
                     }
-                    recvn(sockFd, &datalength, sizeof(int));
+                    if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int))
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     bzero(pwd, sizeof(pwd));
-                    recvn(sockFd, pwd, datalength);
+                    if(datalength < 0 || recvn(sockFd, pwd, datalength) != datalength)
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                 }
 
                 else if (strncmp("ls", cmd, 2) == 0)
@@ -208,7 +245,11 @@ int main()
                     train_state.pre_length = 2;
                     send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
-                    recvn(sockFd, &check, sizeof(int));
+                    if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     //printf("check = %d\n", check);
                     if (check != 0)
                     {
@@ -218,13 +259,21 @@ int main()
                     char file_name[100] = {0};
                     while(1)
                     {
-                        recvn(sockFd, &datalength, sizeof(datalength));
+                        if(recvn(sockFd, &datalength, sizeof(datalength)) != sizeof(datalength))
+                        {
+                            close(sockFd);
+                            return EXIT_FAILURE;
+                        }
                         if(datalength == 0)
                         {
                             break;
                         }
                         bzero(file_name, sizeof(file_name));
-                        recvn(sockFd, file_name, datalength);
+                        if(datalength < 0 || recvn(sockFd, file_name, datalength) != datalength)
+                        {
+                            close(sockFd);
+                            return EXIT_FAILURE;
+                        }
                         printf("%-8s ", file_name);
                     }
                     printf("\n");
@@ -243,8 +292,13 @@ int main()
                     train_state.pre_length = 3;
                     send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     bzero(pwd, sizeof(pwd));
-                    recvn(sockFd, &datalength, sizeof(int));
-                    recvn(sockFd, pwd, datalength);
+                    if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int) ||
+                       datalength < 0 ||
+                       recvn(sockFd, pwd, datalength) != datalength)
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     printf("%s\n", pwd);
                 }
 
@@ -261,7 +315,11 @@ int main()
                     train_state.pre_length = 2;
                     send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check;
-                    recvn(sockFd, &check, sizeof(check));
+                    if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     if(check != 0)
                     {
                         printf("\033[1;31mWrong file name!\033[0m\n");
@@ -281,7 +339,11 @@ int main()
                     train_state.pre_length = 5;
                     send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
-                    recvn(sockFd, &check, sizeof(int));
+                    if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
+                    {
+                        close(sockFd);
+                        return EXIT_FAILURE;
+                    }
                     if (check != 0)
                     {
                         printf("\033[1;31mCan not mkdir!\033[0m\n");

@@ -30,8 +30,12 @@ int register_user(int sockFd)
 
     // 接收盐值
     int datalength;
-    recvn(sockFd, &datalength, sizeof(datalength));
-    recvn(sockFd, salt, datalength);
+    if(recvn(sockFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
+       datalength < 0 ||
+       recvn(sockFd, salt, datalength) != datalength)
+    {
+        return -1;
+    }
 
     // 计算出密文并发送
     strncpy(crptpasswd, crypt(passwd, salt), 49);// 密文!!只存49位
@@ -40,7 +44,10 @@ int register_user(int sockFd)
     strcpy(train.buf, crptpasswd);
     send(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     
-    recvn(sockFd, &check, sizeof(check));// 获取注册结果
+    if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))// 获取注册结果
+    {
+        return -1;
+    }
     return check;
 }
 
@@ -67,7 +74,10 @@ int login(int sockFd, char *uName)
         train_state.pre_length = 0;
         send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
         // 先接收看用户是否存在
-        recvn(sockFd, &check, sizeof(check));
+        if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
+        {
+            return -1;
+        }
         if(check == 2)// 用户未注册
         {
             break;
@@ -77,8 +87,12 @@ int login(int sockFd, char *uName)
         char crptpasswd[50] = {0};
         char salt[SATL_LEN + 1] = {0};
         int datalength;
-        recvn(sockFd, &datalength, sizeof(datalength));
-        recvn(sockFd, salt, datalength);
+        if(recvn(sockFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
+           datalength < 0 ||
+           recvn(sockFd, salt, datalength) != datalength)
+        {
+            return -1;
+        }
         // 计算密文并发送
         strncpy(crptpasswd, crypt(passwd, salt), 49);
         //printf("crptpasswd = %s\n", crptpasswd);
@@ -89,7 +103,10 @@ int login(int sockFd, char *uName)
         send(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
         // 接收验证结果
-        recvn(sockFd, &check, sizeof(check));
+        if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
+        {
+            return -1;
+        }
         //printf("check = %d\n", check);
         if(check == 0)// 密码验证成功
         {

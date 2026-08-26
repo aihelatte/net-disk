@@ -5,19 +5,31 @@
 int recvn(int sockFd, void *pstart, int len)
 {
     int total = 0;
-    int ret;
     char *p = (char*)pstart;
+    if(len < 0)
+    {
+        return -1;
+    }
     while(total < len)// 收完为止
     {
-        ret = recv(sockFd, p + total, len - total, 0);
-        if(ret == 0)// 进来说明没收完，没收完返回值却是0则说明对面断开了，可以退出
+        int ret = recv(sockFd, p + total, len - total, 0);
+        if(ret > 0)
         {
-            return 0;
+            total += ret;
+            continue;
         }
-        ERROR_CHECK(ret, -1, "recv");
-        total += ret;
+        if(ret == 0)// 对端断开，返回实际收到的字节数
+        {
+            return total;
+        }
+        if(errno == EINTR)
+        {
+            continue;
+        }
+        perror("recv");
+        return -1;
     }
-    return 0;
+    return total;
 }
 
 //给服务器上传内容
@@ -59,7 +71,11 @@ int Upload(int netFd, char *file)
 
     // 确认是否需要上传
     int check;
-    recvn(netFd, &check, sizeof(check));
+    if(recvn(netFd, &check, sizeof(check)) != sizeof(check))
+    {
+        close(fd);
+        return EXIT_FAILURE;
+    }
     if(check == 0)// 不需要上传
     {
         printf("\033[1;37;46m本次上传耗时0s^_^\033[0m\n");
@@ -68,7 +84,11 @@ int Upload(int netFd, char *file)
 
     // 获得文件已传大小
     int exitSize = 0;
-    recvn(netFd, &exitSize, sizeof(exitSize));
+    if(recvn(netFd, &exitSize, sizeof(exitSize)) != sizeof(exitSize))
+    {
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
     // printf("time to puts!\n");
 
@@ -109,7 +129,10 @@ int Upload(int netFd, char *file)
     close(fd);
     munmap(p, fileSize);
     int total_time;
-    recvn(netFd, &total_time, sizeof(int));
+    if(recvn(netFd, &total_time, sizeof(int)) != sizeof(int))
+    {
+        return EXIT_FAILURE;
+    }
     printf("\033[1;37;46m本次上传耗时%ds^_^\033[0m\n",total_time);
     return 0;
 }
@@ -119,13 +142,19 @@ int Download(int sockFd)
     // 先获取文件名
     char name[1024] = {0};
     int dataLength;
-    recvn(sockFd, &dataLength, sizeof(int));
+    if(recvn(sockFd, &dataLength, sizeof(int)) != sizeof(int))
+    {
+        return EXIT_FAILURE;
+    }
     if(dataLength == 0)
     {
         printf("\033[1;31mWrong file name!\033[0m\n");
         return EXIT_FAILURE;
     }
-    recvn(sockFd, name, dataLength);
+    if(dataLength < 0 || recvn(sockFd, name, dataLength) != dataLength)
+    {
+        return EXIT_FAILURE;
+    }
     // printf("name = %s\n", name);
     
     char file_path[1024] = {0};
@@ -136,8 +165,18 @@ int Download(int sockFd)
 
     // 获取文件大小
     int fileSize;
-    recvn(sockFd, &dataLength, sizeof(int));
-    recvn(sockFd, &fileSize, dataLength);
+    if(recvn(sockFd, &dataLength, sizeof(int)) != sizeof(int) ||
+       dataLength < 0 ||
+       recvn(sockFd, &fileSize, dataLength) != dataLength)
+    {
+        close(fd);
+        return EXIT_FAILURE;
+    }
+    if(fileSize < 0)
+    {
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
     // 断点重传:
     // 检查本地是否有文件存在，不考虑有不同文件但文件名相同的情况，存在则文件大小不为0
@@ -158,7 +197,12 @@ int Download(int sockFd)
         ftruncate(fd, fileSize); // 预设文件空洞(直接忽略原本文件已经存在的情况)
         char *p = (char *)mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         ERROR_CHECK(p, MAP_FAILED, "mmap");
-        recvn(sockFd, p, fileSize);
+        if(recvn(sockFd, p, fileSize) != fileSize)
+        {
+            munmap(p, fileSize);
+            close(fd);
+            return EXIT_FAILURE;
+        }
         munmap(p, fileSize);
         timeEnd = time(NULL);
     }
@@ -178,7 +222,11 @@ int Download(int sockFd)
                 close(fd);
                 return EXIT_FAILURE;
             }
-            recvn(sockFd, buf, dataLength);
+            if(dataLength < 0 || recvn(sockFd, buf, dataLength) != dataLength)
+            {
+                close(fd);
+                return EXIT_FAILURE;
+            }
             write(fd, buf, dataLength);
         }
     }
