@@ -32,6 +32,48 @@ int recvn(int sockFd, void *pstart, int len)
     return total;
 }
 
+int sendn(int sockFd, const void *pstart, int len, int flags)
+{
+    int total = 0;
+    const char *p = (const char*)pstart;
+    while(total < len)
+    {
+        int ret = send(sockFd, p + total, len - total, flags);
+        if(ret > 0)
+        {
+            total += ret;
+            continue;
+        }
+        if(ret == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        return ret;
+    }
+    return total;
+}
+
+int writen(int fd, const void *pstart, int len)
+{
+    int total = 0;
+    const char *p = (const char*)pstart;
+    while(total < len)
+    {
+        int ret = write(fd, p + total, len - total);
+        if(ret > 0)
+        {
+            total += ret;
+            continue;
+        }
+        if(ret == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        return ret;
+    }
+    return total;
+}
+
 //给服务器上传内容
 int Upload(int netFd, char *file)
 {
@@ -44,13 +86,13 @@ int Upload(int netFd, char *file)
         perror("open");
         bzero(&train, sizeof(train));
         train.length = 0;
-        send(netFd, &train, sizeof(train.length) + train.length, 0);
+        sendn(netFd, &train, sizeof(train.length) + train.length, 0);
     }
 
     // 发送文件名
     train.length = strlen(file);
     strcpy(train.buf, file);
-    int ret = send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    int ret = sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     ERROR_CHECK(ret, -1, "send");
 
     // 发送文件总大小
@@ -60,14 +102,14 @@ int Upload(int netFd, char *file)
     train.length = 4;
     int fileSize = statbuf.st_size;// 获得文件总大小
     memcpy(train.buf, &fileSize, sizeof(int));
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
     // 计算并发送文件md5值(这里大文件可能耗时会比较久)
     char md5_str[MD5_STR_LEN + 1] = {0};
     Compute_file_md5(file_path, md5_str);
     train.length = strlen(md5_str);
     strcpy(train.buf, md5_str);
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
     // 确认是否需要上传
     int check;
@@ -100,7 +142,7 @@ int Upload(int netFd, char *file)
     // printf("fileSize = %d\n", fileSize);
     if(fileSize >= 1073741824)// 大于1G，通过mmap实现零拷贝
     {
-        send(netFd, p + total, fileSize, MSG_NOSIGNAL);
+        sendn(netFd, p + total, fileSize, MSG_NOSIGNAL);
         printf("send once!\n");
     }
     else
@@ -118,11 +160,11 @@ int Upload(int netFd, char *file)
             }
             memcpy(train.buf, p + total, train.length);
             total += train.length;
-            send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+            sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
         }
         // 发送长度为0代表发送结束
         train.length = 0;
-        ret = send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        ret = sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
         ERROR_CHECK(ret, -1, "send");
     }
 
@@ -184,7 +226,7 @@ int Download(int sockFd)
     int ret = fstat(fd, &statbuf);
     ERROR_CHECK(ret, -1, "fstat");
     int exitSize = statbuf.st_size;
-    send(sockFd, &exitSize, sizeof(exitSize), MSG_NOSIGNAL);
+    sendn(sockFd, &exitSize, sizeof(exitSize), MSG_NOSIGNAL);
     lseek(fd, 0, SEEK_END);
 
     time_t timeBeg, timeEnd;
@@ -211,27 +253,32 @@ int Download(int sockFd)
         while (1)
         {
             bzero(buf, sizeof(buf));
-            ret = recv(sockFd, &dataLength, sizeof(int), 0);
+            ret = recvn(sockFd, &dataLength, sizeof(int));
+            if (ret != sizeof(int))// 对面连接断开或长度没有接收完整
+            {
+                close(fd);
+                return EXIT_FAILURE;
+            }
             if (dataLength == 0)
             {
                 timeEnd = time(NULL);
                 break;
-            }
-            if (ret == 0)// 对面连接断开
-            {
-                close(fd);
-                return EXIT_FAILURE;
             }
             if(dataLength < 0 || recvn(sockFd, buf, dataLength) != dataLength)
             {
                 close(fd);
                 return EXIT_FAILURE;
             }
-            write(fd, buf, dataLength);
+            ret = writen(fd, buf, dataLength);
+            if(ret != dataLength)
+            {
+                close(fd);
+                return EXIT_FAILURE;
+            }
         }
     }
     close(fd);
     int total_time = timeEnd - timeBeg;
     printf("\033[1;37;46m本次下载耗时%ds^_^\033[0m\n",total_time);
-    send(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
+    sendn(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
 }

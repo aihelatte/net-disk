@@ -51,7 +51,7 @@ int register_user(train_state_t train_get, int netFd)
     // 发送盐值
     train.length = strlen(salt);
     strcpy(train.buf, salt);
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
     // 收取密文
     int datalength;
@@ -68,7 +68,7 @@ int register_user(train_state_t train_get, int netFd)
     //已被注册，退出
     if(check == 2)// 这里在密文盐值传输之后判断，防止阻塞
     {
-        send(netFd, &check, sizeof(int), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);
         return 0;
     }
 
@@ -103,7 +103,7 @@ int register_user(train_state_t train_get, int netFd)
         find_user_id(user_name, &user_id);      //获取id
         sysadd(user_id, "registed!");
     }
-    send(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否注册成功
+    sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否注册成功
 }
 
 int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
@@ -126,13 +126,13 @@ int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
     {
         // 确认用户存在
         check = 0;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
 
         // 发送盐值
         train_t train;
         train.length = strlen(salt);
         strcpy(train.buf, salt);
-        send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
         // 接收客户端生成的密文
         int datalength;
@@ -149,7 +149,7 @@ int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
             check = 1;// 密码错误
         }
         // 发送验证结果
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         if(check == 1)
         {
             return EXIT_FAILURE;// 密码错误
@@ -172,7 +172,7 @@ int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
     else
     {
         check = 2;// 查找失败，用户未注册
-        send(netFd, &check, sizeof(int), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);
     }
 
     if(check == 0)// 登录成功，发送token值，key值，发送当前目录
@@ -181,17 +181,17 @@ int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
 
         train.length = strlen(token);
         strcpy(train.buf, token);
-        send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
         train.length = strlen(key);
         strcpy(train.buf, key);
-        send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
         char pwd[100] = "~/";// 刚登陆都在家目录
         train.length = strlen(pwd);
         bzero(train.buf, sizeof(train.buf));
         strcpy(train.buf, pwd);
-        send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     }
     return check;
 }
@@ -227,6 +227,6 @@ int token(train_state_t train_get, int netFd)// 检查token值
     {
         user_id = -1;
     }
-    send(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否登录成功
+    sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否登录成功
     return user_id;
 }

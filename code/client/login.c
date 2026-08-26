@@ -22,7 +22,7 @@ int register_user(int sockFd)
     //printf("train.buf = %s\n", train_state.buf);
     train_state.length = strlen(train_state.buf);
     train_state.pre_length = 0;
-    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
     
     // 接收盐值发送密文
     char crptpasswd[50] = {0};
@@ -42,7 +42,7 @@ int register_user(int sockFd)
     train_t train;
     train.length = strlen(crptpasswd);
     strcpy(train.buf, crptpasswd);
-    send(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     
     if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))// 获取注册结果
     {
@@ -72,7 +72,7 @@ int login(int sockFd, char *uName)
         strcpy(train_state.buf, user_name);
         train_state.length = strlen(train_state.buf);
         train_state.pre_length = 0;
-        send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+        sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
         // 先接收看用户是否存在
         if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
         {
@@ -100,7 +100,7 @@ int login(int sockFd, char *uName)
         bzero(&train, sizeof(train));
         train.length = strlen(crptpasswd);
         strcpy(train.buf, crptpasswd);
-        send(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(sockFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
         // 接收验证结果
         if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))

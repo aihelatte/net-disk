@@ -37,6 +37,7 @@ enum command{
 
 int handleCmd(train_state_t train_get, int netFd);
 int recvn(int sockFd, void *pstart, int len);
+int sendn(int sockFd, const void *pstart, int len, int flags);
 int Upload(int netFd, char *file);
 int Download(int sockFd);
 

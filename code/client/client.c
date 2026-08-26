@@ -167,13 +167,17 @@ int main()
             if(readyArr[i].data.fd == sockFd)// 服务端发送了超时断开要求
             {
                 int check;
-                recv(sockFd, &check, sizeof(check), 0);
+                if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
+                {
+                    close(sockFd);
+                    return EXIT_FAILURE;
+                }
                 printf("time out, bye!\n");
 
                 train_t train;
                 bzero(&train, sizeof(train));
                 train.length = 0;
-                send(sockFd, &train, sizeof(train.length) + train.length, 0);
+                sendn(sockFd, &train, sizeof(train.length) + train.length, 0);
                 // printf("child process, threadPool is going to die!\n");
                 threadPool.exitFlag = 1;
                 pthread_cond_broadcast(&threadPool.taskQueue.cond);
@@ -207,7 +211,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 2;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
                     if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
                     {
@@ -243,7 +247,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 2;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
                     if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
                     {
@@ -290,7 +294,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 3;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     bzero(pwd, sizeof(pwd));
                     if(recvn(sockFd, &datalength, sizeof(int)) != sizeof(int) ||
                        datalength < 0 ||
@@ -313,7 +317,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 2;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check;
                     if(recvn(sockFd, &check, sizeof(check)) != sizeof(check))
                     {
@@ -337,7 +341,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 5;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     int check = 0;
                     if(recvn(sockFd, &check, sizeof(int)) != sizeof(int))
                     {
@@ -363,7 +367,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 4;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     // 唤醒子线程
                     strcpy(server.cmd, cmd);
                     pthread_mutex_lock(&threadPool.taskQueue.mutex);
@@ -384,7 +388,7 @@ int main()
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 4;
-                    send(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
+                    sendn(sockFd, &train_state, sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length, 0);
                     // 唤醒子线程
                     strcpy(server.cmd, cmd);
                     pthread_mutex_lock(&threadPool.taskQueue.mutex);
@@ -404,7 +408,7 @@ int main()
                 train_t train;
                 bzero(&train, sizeof(train));
                 train.length = 0;
-                send(sockFd, &train, sizeof(train.length) + train.length, 0);
+                sendn(sockFd, &train, sizeof(train.length) + train.length, 0);
                 // printf("child process, threadPool is going to die!\n");
                 threadPool.exitFlag = 1;
                 pthread_cond_broadcast(&threadPool.taskQueue.cond); // 叫醒所有线程

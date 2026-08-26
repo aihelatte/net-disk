@@ -21,7 +21,7 @@ int do_cd(char *dir_name, int netFd, int user_id)
     if(dir_name[0] == '/')
     {
         check = 1;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         return 0;
     }
     int code;
@@ -39,7 +39,7 @@ int do_cd(char *dir_name, int netFd, int user_id)
         if(code == 0)// 已经在根目录，不能返回上级
         {
             check = 1;
-            send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+            sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
             return 0;
         }
         get_parent_id(code, &parent_code);
@@ -96,7 +96,7 @@ int do_cd(char *dir_name, int netFd, int user_id)
                 if (code == 0) // 已经在根目录，不能返回上级
                 {
                     check = 1;
-                    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                     return 0;
                 }
                 get_parent_id(code, &parent_code);
@@ -109,7 +109,7 @@ int do_cd(char *dir_name, int netFd, int user_id)
             if (ret != 0 || strcmp(type, "d") != 0)  // 文件查找失败；不是目录文件；不在可搜索路径下
             {
                 check = 1;
-                send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                 return 0;
             }
             if (parent_code != 0)
@@ -122,11 +122,11 @@ int do_cd(char *dir_name, int netFd, int user_id)
     }
     // printf("pwd = %s, code = %d\n", pwd, code);
     update_user_pwd(user_id, pwd, code);
-    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
     train_t train;
     train.length = strlen(pwd);
     strcpy(train.buf, pwd);
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     return 0;
 }
 
@@ -144,7 +144,7 @@ int do_ls(char *file_name, int netFd, int user_id)
     if(file_name[0] == '/')
     {
         check = 1;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         return 0;
     }
     if(strlen(file_name) == 0 || strcmp(file_name, ".") == 0 || strcmp(file_name, "./") == 0)
@@ -165,7 +165,7 @@ int do_ls(char *file_name, int netFd, int user_id)
             if (code == 0) // 已经在根目录，不能返回上级
             {
                 check = 1;
-                send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                 return 0;
             }
             get_parent_id(code, &parent_code);
@@ -201,7 +201,7 @@ int do_ls(char *file_name, int netFd, int user_id)
                     if (code == 0) // 已经在根目录，不能返回上级
                     {
                         check = 1;
-                        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                         return 0;
                     }
                     get_parent_id(code, &parent_code);
@@ -215,7 +215,7 @@ int do_ls(char *file_name, int netFd, int user_id)
                 if (ret != 0 || strcmp(type, "d") != 0)  // 文件查找失败；不是目录文件；不在可搜索路径下
                 {
                     check = 1;
-                    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                     return 0;
                 }
                 parent_code = code; // 继续往下遍历，遍历结束code就是要浏览的目录的文件id
@@ -223,7 +223,7 @@ int do_ls(char *file_name, int netFd, int user_id)
         }
     }
     printf("code = %d\n", code);
-    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
     //code为最后文件夹的code，直接发送他的所有文件
     find_code_files(netFd, code, user_id);// 把找到的文件发给客户端
 
@@ -238,7 +238,7 @@ int do_pwd(char *file_name, int user_id, int netFd)
     train_t train;
     train.length = strlen(pwd);
     strcpy(train.buf, pwd);
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 }
 
 int do_rm(char *file_name, int user_id, int netFd)
@@ -254,7 +254,7 @@ int do_rm(char *file_name, int user_id, int netFd)
     if(file_name[0] == '/' || strcmp(file_name, ".") == 0 || strcmp(file_name, "~/") == 0 || strcmp(file_name, "./") == 0 || strcmp(file_name, "..") == 0 || strcmp(file_name, "../") == 0)
     {
         check = 1;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         return 0;
     }
     else// 不是以上几种情况就遍历获得要删除的文件的id和类型
@@ -287,7 +287,7 @@ int do_rm(char *file_name, int user_id, int netFd)
                 if (code == 0) // 已经在根目录，不能返回上级
                 {
                     check = 1;
-                    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                     return 0;
                 }
                 get_parent_id(code, &parent_code);
@@ -301,7 +301,7 @@ int do_rm(char *file_name, int user_id, int netFd)
             if(ret != 0)// 路径错误
             {
                 check = 1;
-                send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
                 return 0;
             }
             if(j != i-1)
@@ -314,7 +314,7 @@ int do_rm(char *file_name, int user_id, int netFd)
     if(code == 0)
     {
         check = 1;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         return 0;
     }
     // printf("code = %d\n", code);
@@ -327,7 +327,7 @@ int do_rm(char *file_name, int user_id, int netFd)
         minus_link(md5_str);// 本地文件链接数减一
     }
     del_virtual_file(code, user_id);// 先查询后删除
-    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
 }
 
 int do_mkdir(char *dir_name, int netFd, int user_id)
@@ -345,11 +345,11 @@ int do_mkdir(char *dir_name, int netFd, int user_id)
     if(ret == 0)
     {
         check = 1;
-        send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
         return 0;
     }
     check = add_virtual_dir(code, dir_name, user_id);
-    send(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
     return 0;
 }
 

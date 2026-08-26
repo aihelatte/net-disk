@@ -11,7 +11,7 @@ int Compute_file_md5(char *file_path, char *md5_str)
     unsigned char data[READ_DATA_SIZE];
 	unsigned char md5_value[MD5_SIZE];
 	MD5_CTX md5;
- 
+
 	fd = open(file_path, O_RDONLY);
 	if (-1 == fd)
 	{
@@ -27,16 +27,19 @@ int Compute_file_md5(char *file_path, char *md5_str)
 		ret = read(fd, data, READ_DATA_SIZE);
 		if (-1 == ret)
 		{
+			if(errno == EINTR)
+			{
+				continue;
+			}
 			perror("read");
 			return -1;
 		}
- 
-		MD5Update(&md5, data, ret);
-        // j++;
-		if (0 == ret || ret < READ_DATA_SIZE)
+		if (0 == ret)
 		{
 			break;
 		}
+		MD5Update(&md5, data, ret);
+        // j++;
 	}
  
 	close(fd);

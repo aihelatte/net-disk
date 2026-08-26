@@ -157,7 +157,7 @@ int main(int argc, char *argv[])
                 while(cur != NULL)// 队列不为空则关闭队列中的所有netFd
                 {
                     netFd = cur->netFd;
-                    send(netFd, "1", 1, MSG_NOSIGNAL);
+                    sendn(netFd, "1", 1, MSG_NOSIGNAL);
                     cur = cur->next;
                     // fdDel(netFd, &clientQueue);// 在退出那里删了，就不需要重复删了
                 }
@@ -203,10 +203,10 @@ int main(int argc, char *argv[])
                 //命令版tlv协议数据单元
                 train_state_t train_get;
                 bzero(&train_get, sizeof(train_get));
-                ret = recv(netFd, &train_get.length, sizeof(int), 0);
+                ret = recvn(netFd, &train_get.length, sizeof(int));
                 
                 // printf("datalength = %d, ret = %d\n", train_get.length, ret);
-                if(ret == 0 || train_get.length == 0)// 发现客户端退出了
+                if(ret != sizeof(int) || train_get.length == 0)// 发现客户端退出了
                 {
                     char uName[100] = {0};
                     get_user_name(uName,clientQueue.client[netFd]);//netfd-->user_id-->user_name

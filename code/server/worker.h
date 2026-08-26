@@ -72,6 +72,7 @@ int decode(char *key, char *user_name, char *token);// 验证token
 // 处理短命令
 int handle_short_cmd(train_state_t train_get, int netFd, int user_id);
 int recvn(int sockFd, void *pstart, int len);
+int sendn(int sockFd, const void *pstart, int len, int flags);
 
 // 处理长命令
 int handle_long_cmd(int netFd, int user_id);

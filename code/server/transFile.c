@@ -32,6 +32,48 @@ int recvn(int sockFd, void *pstart, int len)
     return total;
 }
 
+int sendn(int sockFd, const void *pstart, int len, int flags)
+{
+    int total = 0;
+    const char *p = (const char*)pstart;
+    while(total < len)
+    {
+        int ret = send(sockFd, p + total, len - total, flags);
+        if(ret > 0)
+        {
+            total += ret;
+            continue;
+        }
+        if(ret == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        return ret;
+    }
+    return total;
+}
+
+int writen(int fd, const void *pstart, int len)
+{
+    int total = 0;
+    const char *p = (const char*)pstart;
+    while(total < len)
+    {
+        int ret = write(fd, p + total, len - total);
+        if(ret > 0)
+        {
+            total += ret;
+            continue;
+        }
+        if(ret == -1 && errno == EINTR)
+        {
+            continue;
+        }
+        return ret;
+    }
+    return total;
+}
+
 int Upload(int netFd, char *file, int user_id)
 {
     // 打开文件之前需要先获取文件在本地的真实名称
@@ -54,13 +96,13 @@ int Upload(int netFd, char *file, int user_id)
         perror("open");
         bzero(&train, sizeof(train));
         train.length = 0;
-        send(netFd, &train, sizeof(train.length) + train.length, 0);
+        sendn(netFd, &train, sizeof(train.length) + train.length, 0);
     }
     // 发送文件名(虚拟文件表中存的文件名，客户端下载到本地也用这个名字)；
     // 后序与普通下载文件没有区别，客户端本地下载不存在秒传，默认下载的文件本地没有，且客户端本地的下载做了检查，文件存在则会将指针偏移到文件结尾
     train.length = strlen(file);
     strcpy(train.buf, file);
-    int ret = send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    int ret = sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     ERROR_CHECK(ret, -1, "send");
     
     // 发送文件总大小
@@ -70,7 +112,7 @@ int Upload(int netFd, char *file, int user_id)
     train.length = 4;
     int fileSize = statbuf.st_size;// 获得文件总大小
     memcpy(train.buf, &fileSize, sizeof(int));
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
 
     // 获得文件已传大小
     int exitSize = 0;
@@ -89,7 +131,7 @@ int Upload(int netFd, char *file, int user_id)
     if(fileSize >= 1073741824)// 大于1G，基于mmap的零拷贝
     {
         //直接将数据从文件对象的缓冲区发送到netfd，不适用断点续传
-        send(netFd, p, fileSize, MSG_NOSIGNAL);
+        sendn(netFd, p, fileSize, MSG_NOSIGNAL);
         printf("send once!\n");
     }
     else
@@ -107,11 +149,11 @@ int Upload(int netFd, char *file, int user_id)
             }
             memcpy(train.buf, p + total, train.length);
             total += train.length;
-            send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+            sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
         }
         // 发送长度为0代表发送结束
         train.length = 0;
-        ret = send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        ret = sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
         ERROR_CHECK(ret, -1, "send");
     }
 
@@ -208,11 +250,11 @@ int Download(int sockFd, int user_id)
         if(exitSize < fileSize)// 需要上传，断点续传
         {
             check = 1;
-            send(sockFd, &check, sizeof(int), MSG_NOSIGNAL);// 通知客户端文件需要上传
+            sendn(sockFd, &check, sizeof(int), MSG_NOSIGNAL);// 通知客户端文件需要上传
         }
         else// 不需要上传，秒传
         {
-            send(sockFd, &check, sizeof(int), MSG_NOSIGNAL); // 通知客户端文件存在不需要上传
+            sendn(sockFd, &check, sizeof(int), MSG_NOSIGNAL); // 通知客户端文件存在不需要上传
             // 将本地文件表中相应文件的link数加1
             if (ret1 != 0) // 文件原先在虚拟文件表中不存在，链接数加1
             {
@@ -221,14 +263,14 @@ int Download(int sockFd, int user_id)
             timeEnd = time(NULL);
             int total_time = timeEnd - timeBeg;
             printf("total time = %ds\n", total_time);
-            send(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
+            sendn(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
             return 0;
         }
     }
     else// 文件在本地不存在
     {
         check = 1;
-        send(sockFd, &check, sizeof(int), MSG_NOSIGNAL); // 通知客户端文件需要上传
+        sendn(sockFd, &check, sizeof(int), MSG_NOSIGNAL); // 通知客户端文件需要上传
         // 文件不存在，需要下载到本地，且添加到本地文件表中
         // 1. 拼一个本地文件名
         // 拼接出一个本地文件名，用文件名、user_id和当前目录id，这样不同用户的同名文件，或同一用户不同文件夹中的同名文件，就不会在本地重名了
@@ -249,7 +291,7 @@ int Download(int sockFd, int user_id)
         exitSize = statbuf.st_size;
     }
     // 发送本地文件大小
-    send(sockFd, &exitSize, sizeof(exitSize), MSG_NOSIGNAL);
+    sendn(sockFd, &exitSize, sizeof(exitSize), MSG_NOSIGNAL);
     //偏移到末尾，进行续传
     lseek(fd, 0, SEEK_END);
 
@@ -276,13 +318,8 @@ int Download(int sockFd, int user_id)
         {
             bzero(buf, sizeof(buf));
             //先接收本次长度
-            ret = recv(sockFd, &dataLength, sizeof(int), 0);
-            if (dataLength == 0 )// 收到0代表传输结束
-            {
-                timeEnd = time(NULL);
-                break;
-            }
-            if(ret == 0)// ret为0说明对面提前断开了
+            ret = recvn(sockFd, &dataLength, sizeof(int));
+            if(ret != sizeof(int))// 对面连接断开或长度没有接收完整
             {
                 close(fd);
                 timeEnd = time(NULL);
@@ -290,17 +327,27 @@ int Download(int sockFd, int user_id)
                 printf("total time = %ds\n", total_time);
                 return EXIT_FAILURE;
             }
+            if (dataLength == 0 )// 收到0代表传输结束
+            {
+                timeEnd = time(NULL);
+                break;
+            }
             if(dataLength < 0 || recvn(sockFd, buf, dataLength) != dataLength)
             {
                 close(fd);
                 return EXIT_FAILURE;
             }
             //写到文件对象中
-            write(fd, buf, dataLength);
+            ret = writen(fd, buf, dataLength);
+            if(ret != dataLength)
+            {
+                close(fd);
+                return EXIT_FAILURE;
+            }
         }
     }
     close(fd);
     int total_time = timeEnd - timeBeg;
     printf("total time = %ds\n", total_time);
-    send(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
+    sendn(sockFd, &total_time, sizeof(int), MSG_NOSIGNAL);
 }

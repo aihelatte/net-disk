@@ -736,11 +736,11 @@ int find_code_files(int netFd, int code, int user_id)
         bzero(train.buf, sizeof(train.buf));
         strcpy(train.buf, row[0]);
         //每找到一个文件，就发给客户端
-        send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     }
     // 发送长度0表示结束
     train.length = 0;
-    send(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
     mysql_free_result(result);
     mysql_close(conn);
     return EXIT_FAILURE;
