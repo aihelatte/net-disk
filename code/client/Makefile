@@ -5,7 +5,7 @@ OBJS:=$(patsubst %.c,%.o,$(SRCS))#把.c文件替换为.o文件
 #预定义变量
 CC:=gcc
 CPPFLAGS:=-I../include
-CFLAGS:=-g
+CFLAGS:=-g -Wall -Wextra -Wpedantic -Werror=return-type
 LDFLAGS:=-L../l8w8jwt/bin/release
 $(out):$(OBJS)
 	$(CC) $^ -o $@ $(LDFLAGS) -pthread -lcrypt -ll8w8jwt -lmbedcrypto -lmbedx509 -g

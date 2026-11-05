@@ -11,7 +11,9 @@ int init_clientQueue(clientQueue_t *pclientQueue)
         perror("getrlimit");
         return -1;
     }
-    if(fdLimit.rlim_cur == RLIM_INFINITY || fdLimit.rlim_cur == 0)
+    if(fdLimit.rlim_cur == RLIM_INFINITY || fdLimit.rlim_cur == 0 ||
+       fdLimit.rlim_cur > SIZE_MAX / sizeof(int) ||
+       fdLimit.rlim_cur > SIZE_MAX / sizeof(connection_t *))
     {
         fprintf(stderr, "Invalid file descriptor limit.\n");
         return -1;
@@ -20,10 +22,13 @@ int init_clientQueue(clientQueue_t *pclientQueue)
     pclientQueue->fd_capacity = (size_t)fdLimit.rlim_cur;
     pclientQueue->client = calloc(pclientQueue->fd_capacity, sizeof(int));
     pclientQueue->index = calloc(pclientQueue->fd_capacity, sizeof(int));
-    if(pclientQueue->client == NULL || pclientQueue->index == NULL)
+    pclientQueue->connections = calloc(pclientQueue->fd_capacity, sizeof(connection_t *));
+    if(pclientQueue->client == NULL || pclientQueue->index == NULL ||
+       pclientQueue->connections == NULL)
     {
         free(pclientQueue->client);
         free(pclientQueue->index);
+        free(pclientQueue->connections);
         return -1;
     }
 
@@ -31,7 +36,7 @@ int init_clientQueue(clientQueue_t *pclientQueue)
     //初始化客户端数组的usr_id
     memset(pclientQueue->client, -1, pclientQueue->fd_capacity * sizeof(int));
     //初始化哈希表，内容为netfd对于所在循环队列的位置
-    memset(pclientQueue->index, 0, pclientQueue->fd_capacity * sizeof(int));
+    memset(pclientQueue->index, -1, pclientQueue->fd_capacity * sizeof(int));
     for(int i = 0; i < TIME_SLICE; ++i)//初始化循环队列里面的集合（队列） 
     {
         pclientQueue->time_out[i].head = NULL;
@@ -44,7 +49,16 @@ int init_clientQueue(clientQueue_t *pclientQueue)
 //事件加入集合
 int fdAdd(int netFd, clientQueue_t *pclientQueue)// 尾插法
 {
+    if(netFd < 0 || (size_t)netFd >= pclientQueue->fd_capacity)
+    {
+        return -1;
+    }
     slotNode_t *newSlot = (slotNode_t *)calloc(1, sizeof(slotNode_t));
+    if(newSlot == NULL)
+    {
+        return -1;
+    }
+    fdDel(netFd, pclientQueue);
     newSlot->netFd = netFd;
     pclientQueue->index[netFd] = (pclientQueue->timer + TIME_SLICE - 1) % TIME_SLICE;// 加入时有TIME_SLICE的时间，timer是下一次要检查的地方
     int index = (pclientQueue->timer + TIME_SLICE - 1) % TIME_SLICE;
@@ -60,14 +74,23 @@ int fdAdd(int netFd, clientQueue_t *pclientQueue)// 尾插法
         pclientQueue->time_out[index].tail->next = newSlot;
         pclientQueue->time_out[index].tail = newSlot;
     }
+    return 0;
 }
 
 //在时间转轮中删除netfd
 int fdDel(int netFd, clientQueue_t *pclientQueue)
 {
     //利用哈希根据netfd获取所在下标
+    if(netFd < 0 || (size_t)netFd >= pclientQueue->fd_capacity)
+    {
+        return -1;
+    }
     int index = pclientQueue->index[netFd];
-    pclientQueue->index[netFd] = 0;// 重设为0
+    if(index < 0 || index >= TIME_SLICE)
+    {
+        return 0;
+    }
+    pclientQueue->index[netFd] = -1;// 标记已从时间轮移除
     slotNode_t *cur = pclientQueue->time_out[index].head;
     slotNode_t *pre = NULL;
     while(cur != NULL)

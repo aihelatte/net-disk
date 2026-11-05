@@ -3,8 +3,12 @@
 int taskEnqueue(taskQueue_t *pTaskQueue, server_t *pserver)
 {
     task_t *pTask = (task_t *)calloc(1, sizeof(task_t));
-    pTask->pserver = pserver;
-    // memcpy(pTask->pserver, pserver, sizeof(server_t));
+    if(pTask == NULL)
+    {
+        perror("calloc");
+        return EXIT_FAILURE;
+    }
+    pTask->server = *pserver;
     // printf("check!\n"); 
     if(pTaskQueue->size == 0)
     {
@@ -31,5 +35,9 @@ int taskDequeue(taskQueue_t *pTaskQueue)
     pTaskQueue->pFront = pCur->pNext;
     free(pCur);
     --pTaskQueue->size;
+    if(pTaskQueue->size == 0)
+    {
+        pTaskQueue->pRear = NULL;
+    }
     return 0;
 }

@@ -2,231 +2,221 @@
 #include "worker.h"
 int make_salt(char *salt)
 {
-    int i , flag;
-    //时间戳作为随机的种子
-    srand(time(NULL));
-    //前面三个字符固定
-    salt[0] = '$';
-    salt[1] = '6';
-    salt[2] = '$';
-    //后面随机
-    for(i = 3; i < SATL_LEN; ++i)
+    static const char chars[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if(fd == -1)
     {
-        flag = rand()%3; switch(flag)
+        return -1;
+    }
+    unsigned char random[SATL_LEN - 3];
+    size_t total = 0;
+    while(total < sizeof(random))
+    {
+        ssize_t ret = read(fd, random + total, sizeof(random) - total);
+        if(ret == -1 && errno == EINTR)
         {
-        case 0:
-            salt[i] = rand()%26 + 'a';
-            break; 
-        case 1:
-            salt[i] = rand()%26 + 'A';
-            break; 
-        case 2:
-            salt[i] = rand()%10 + '0';
-            break;
+            continue;
         }
+        if(ret <= 0)
+        {
+            close(fd);
+            return -1;
+        }
+        total += ret;
+    }
+    close(fd);
+    memcpy(salt, "$6$", 3);
+    for(int i = 3; i < SATL_LEN; ++i)
+    {
+        salt[i] = chars[random[i - 3] & 63];
+    }
+    salt[SATL_LEN] = '\0';
+    return 0;
+}
+
+// 第一次处理用户名并排队发送盐值；密码到齐后再次进入此函数
+int register_user(connection_t *pConnection)
+{
+    if(pConnection->stage == RECEIVE_COMMAND)
+    {
+        strcpy(pConnection->user_name, pConnection->train.buf);
+        int user_id;
+        int ret = find_user_id(pConnection->user_name, &user_id);
+        if(ret < 0)
+        {
+            return -1;
+        }
+        pConnection->auth_check = ret == 0 ? 2 : 0;
+        if(make_salt(pConnection->salt) != 0)
+        {
+            return -1;
+        }
+        train_t train;
+        train.length = strlen(pConnection->salt);
+        strcpy(train.buf, pConnection->salt);
+        if(wire_queue_train(pConnection, &train) !=
+           (int)(sizeof(train.length) + train.length))
+        {
+            return -1;
+        }
+        pConnection->stage = RECEIVE_REGISTER_PASSWORD;
+        return 0;
+    }
+
+    int check = pConnection->auth_check;
+    char crptpasswd[50] = {0};
+    // 密码帧只有length和正文，不含命令帧的state、pre_length
+    memcpy(crptpasswd, (char *)&pConnection->train + sizeof(int), 49);
+    if(check == 0)
+    {
+        if(add_user(pConnection->user_name, pConnection->salt, crptpasswd) != 0)
+        {
+            check = 1;
+        }
+        else
+        {
+            int user_id;
+            if(find_user_id(pConnection->user_name, &user_id) != 0)
+            {
+                return -1;
+            }
+            sysadd(user_id, "registed!");
+        }
+    }
+    pConnection->stage = RECEIVE_COMMAND;
+    return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
+}
+
+int login(connection_t *pConnection, clientQueue_t *pclientQueue)
+{
+    int check = 0;
+    if(pConnection->stage == RECEIVE_COMMAND)
+    {
+        strcpy(pConnection->user_name, pConnection->train.buf);
+        int ret = get_user_salt(pConnection->user_name, pConnection->salt,
+                                pConnection->password);
+        if(ret < 0)
+        {
+            return -1;
+        }
+        if(ret != 0)
+        {
+            check = 2;// 用户未注册，仍允许此连接重新登录或注册
+        }
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
+        if(check != 0)
+        {
+            return 0;
+        }
+        train_t train;
+        train.length = strlen(pConnection->salt);
+        strcpy(train.buf, pConnection->salt);
+        if(wire_queue_train(pConnection, &train) !=
+           (int)(sizeof(train.length) + train.length))
+        {
+            return -1;
+        }
+        pConnection->stage = RECEIVE_LOGIN_PASSWORD;
+        return 0;
+    }
+
+    const char *crptpasswd = (const char *)&pConnection->train + sizeof(int);
+    if(memcmp(pConnection->password, crptpasswd, 49) != 0)
+    {
+        check = 1;
+    }
+    memset(pConnection->password, 0, sizeof(pConnection->password));
+    pConnection->stage = RECEIVE_COMMAND;
+    if(wire_queue_int(pConnection, check) != sizeof(check))
+    {
+        return -1;
+    }
+    if(check != 0)
+    {
+        return 0;
+    }
+
+    int user_id;
+    if(find_user_id(pConnection->user_name, &user_id) != 0)
+    {
+        return -1;
+    }
+    char token[1024] = {0};
+    if(make_session_id(pConnection->sid) != 0 || encode(pConnection, token) != 0)
+    {
+        return -1;
+    }
+    sysadd(user_id, "login successful!");
+
+    train_t train;
+    train.length = strlen(token);
+    if(train.length >= (int)sizeof(train.buf))
+    {
+        return -1;
+    }
+    strcpy(train.buf, token);
+    if(wire_queue_train(pConnection, &train) !=
+       (int)(sizeof(train.length) + train.length))
+    {
+        return -1;
+    }
+    int lifetime = TOKEN_LIFETIME;
+    if(wire_queue_int(pConnection, lifetime) != sizeof(lifetime))
+    {
+        return -1;
+    }
+    strcpy(train.buf, "~/");
+    train.length = strlen(train.buf);
+    if(wire_queue_train(pConnection, &train) !=
+       (int)(sizeof(train.length) + train.length))
+    {
+        return -1;
+    }
+    pclientQueue->client[pConnection->netFd] = user_id;
+    return 0;
+}
+
+int refresh_token(connection_t *pConnection)
+{
+    char token[1024] = {0};
+    if(encode(pConnection, token) != 0)
+    {
+        return -1;
+    }
+    train_t train;
+    train.length = strlen(token);
+    if(train.length >= (int)sizeof(train.buf))
+    {
+        return -1;
+    }
+    strcpy(train.buf, token);
+    int reply = TOKEN_REFRESH_REPLY;
+    int lifetime = TOKEN_LIFETIME;
+    if(wire_queue_int(pConnection, reply) != sizeof(reply) ||
+       wire_queue_train(pConnection, &train) !=
+       (int)(sizeof(train.length) + train.length) ||
+       wire_queue_int(pConnection, lifetime) != sizeof(lifetime))
+    {
+        return -1;
     }
     return 0;
 }
 
-int register_user(train_state_t train_get, int netFd)
+int token(connection_t *pConnection, clientQueue_t *pclientQueue)
 {
-    char user_name[100] = {0};// username!!
-    char passwd[100] = {0};
-    int check = 0;
-    int user_id;
-    // 读取传入的用户名
-    strncpy(user_name, train_get.buf, train_get.length);
-    printf("user_name = %s\n", user_name);
-    strcpy(passwd, train_get.buf + train_get.pre_length);   //buf偏移后，把密码赋值给passwd
-
-    int ret = find_user_id(user_name, &user_id);
-    if (ret == 0) // 如果这里查找成功，说明用户已存在，注册失败(用户名不可重复)
-    {
-        check = 2;
-    }
-
-    train_t train;
-    char salt[SATL_LEN + 1] = {0};// 留一位存结束符
-    make_salt(salt);// salt!!
-    // 发送盐值
-    train.length = strlen(salt);
-    strcpy(train.buf, salt);
-    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
-
-    // 收取密文
-    int datalength;
-    char crptpasswd[50] = {0};
-    if(recvn(netFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
-       datalength < 0 ||
-       recvn(netFd, crptpasswd, datalength) != datalength)
-    {
-        return EXIT_FAILURE;
-    }
-
-    char pwd[100] = "~/";// pwd!!
-
-    //已被注册，退出
-    if(check == 2)// 这里在密文盐值传输之后判断，防止阻塞
-    {
-        sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);
-        return 0;
-    }
-
-    // 注册成功，插入数据库
-    MYSQL *conn = NULL;
-
-    ret = mysqlconnect(&conn);
-    if(ret != 0)
-    {
-        check = 1;
-    }
-    ret = mysql_query(conn, "set names 'utf8'");
-    if(ret != 0)
-    {
-        printf("error query1:%s\n", mysql_error(conn));
-        return EXIT_FAILURE;
-    }
-
-    char query[1024] = {0};
-    sprintf(query, "insert into client_info(username, salt, cryptpasswd, pwd, code) \
-                    values('%s', '%s', '%s', '%s', 0)", user_name, salt, crptpasswd, pwd);
-    ret = do_query(query, &conn);// 插入注册信息
-    if(ret != 0)
-    {
-        check = 1;
-    }
-    mysql_close(conn);
-
-    //check=0表示注册成功，把注册操作写入日志
-    if(check == 0)
-    { 
-        find_user_id(user_name, &user_id);      //获取id
-        sysadd(user_id, "registed!");
-    }
-    sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否注册成功
-}
-
-int login(train_state_t train_get, int netFd, clientQueue_t *pclientQueue)
-{
-    // 初始化需要用到的信息
-    char user_name[100] = {0};// username!!
-    char token[1024] = {0};
-    char key[100] = {0};
-    int user_id = 0;
-    int check = 0;// 用于确认登录是否正确
-
-    // 从传入的信息中读取用户名和密码
-    strncpy(user_name, train_get.buf, train_get.length);
-    
-    char crptpasswd[50] = {0};
-    char salt[SATL_LEN + 1] = {0};
-    // 查找用户，获取盐值和密文
-    int ret = get_user_salt(user_name, salt, crptpasswd);
-    if(ret == 0)// 查找成功
-    {
-        // 确认用户存在
-        check = 0;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
-
-        // 发送盐值
-        train_t train;
-        train.length = strlen(salt);
-        strcpy(train.buf, salt);
-        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
-
-        // 接收客户端生成的密文
-        int datalength;
-        char crptpasswd_client[50] = {0};
-        if(recvn(netFd, &datalength, sizeof(int)) != sizeof(int) ||
-           datalength < 0 ||
-           recvn(netFd, crptpasswd_client, datalength) != datalength)
-        {
-            return EXIT_FAILURE;
-        }
-
-        if(strncmp(crptpasswd, crptpasswd_client, 49) != 0)// 只比较前49位
-        {
-            check = 1;// 密码错误
-        }
-        // 发送验证结果
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
-        if(check == 1)
-        {
-            return EXIT_FAILURE;// 密码错误
-        }
-        else
-        {
-            printf("right\n");
-            // 密码正确，用户连接成功，加入连接队列
-            find_user_id(user_name, &user_id);
-            sprintf(key, "YoUR sUpEr S3krEt %d HMAC kEy HeRE", user_id);// 每个用户的key值不同
-            pclientQueue->client[netFd] = user_id;// 插入用户队列，下标为netFd
-            sysadd(user_id, "login successful!");// 记入日志
-            // 获取token值(未判断获取失败的情况)
-            encode(key, user_name, token);
-            // printf("user_name = %s\n", user_name);
-            // printf("token = %s\n",token);
-            // printf("key = %s\n", key);
-        }
-    }
-    else
-    {
-        check = 2;// 查找失败，用户未注册
-        sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);
-    }
-
-    if(check == 0)// 登录成功，发送token值，key值，发送当前目录
-    {
-        train_t train;
-
-        train.length = strlen(token);
-        strcpy(train.buf, token);
-        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
-
-        train.length = strlen(key);
-        strcpy(train.buf, key);
-        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
-
-        char pwd[100] = "~/";// 刚登陆都在家目录
-        train.length = strlen(pwd);
-        bzero(train.buf, sizeof(train.buf));
-        strcpy(train.buf, pwd);
-        sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
-    }
-    return check;
-}
-
-int token(train_state_t train_get, int netFd)// 检查token值
-{
-    int check = 1;
+    train_state_t *pTrain = &pConnection->train;
     int user_id = -1;
     char token[1024] = {0};
-    char key[100] = {0};
     char user_name[100] = {0};
-
-    //分别赋值用户名和token
-    strncpy(user_name, train_get.buf, train_get.pre_length);
-    // printf("user_name = %s\n", user_name);
-
-    strcpy(token, train_get.buf + train_get.pre_length);
-    // printf("token = %s\n",token);
-    
-    //找到userid
-    find_user_id(user_name, &user_id);
-    sprintf(key, "YoUR sUpEr S3krEt %d HMAC kEy HeRE", user_id);
-    // printf("key = %s\n", key);
-
-    //解码token，判断该用户的token是否匹配key
-    int ret = decode(key, user_name, token);
-    if(ret == 0)
+    memcpy(user_name, pTrain->buf, pTrain->pre_length);
+    strcpy(token, pTrain->buf + pTrain->pre_length);
+    int check = decode(user_name, token, pclientQueue, &user_id);
+    if(wire_queue_int(pConnection, check) != sizeof(check))
     {
-        printf("right!\n");
-        check = 0;
+        return -2;
     }
-    else// 不正确的话user_id变为-1
-    {
-        user_id = -1;
-    }
-    sendn(netFd, &check, sizeof(int), MSG_NOSIGNAL);// 确认是否登录成功
-    return user_id;
+    return check == TOKEN_VALID ? user_id : -1;
 }

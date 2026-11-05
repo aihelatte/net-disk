@@ -45,8 +45,25 @@ int makeWorker(threadPool_t *pThreadPool)
 {
     for(int i = 0; i < pThreadPool->threadNum; ++i)
     {
-        pthread_create(&pThreadPool->tid[i], NULL, handleEvent, (void *)pThreadPool);
+        int ret = pthread_create(&pThreadPool->tid[i], NULL, handleEvent, (void *)pThreadPool);
+        if(ret != 0)
+        {
+            fprintf(stderr, "pthread_create: %s\n", strerror(ret));
+            pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+            pThreadPool->exitFlag = 1;
+            pthread_cond_broadcast(&pThreadPool->taskQueue.cond);
+            pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+            for(int j = 0; j < i; ++j)
+            {
+                pthread_join(pThreadPool->tid[j], NULL);
+            }
+            free(pThreadPool->tid);
+            pthread_cond_destroy(&pThreadPool->taskQueue.cond);
+            pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
+            return -1;
+        }
     }
+    return 0;
 }
 int handle_long_cmd(int netFd, int user_id)
 {
@@ -54,9 +71,13 @@ int handle_long_cmd(int netFd, int user_id)
     // 接收命令
     char cmd[100] = {0};
     int datalength;
-    if(recvn(netFd, &datalength, sizeof(datalength)) != sizeof(datalength) ||
-       datalength < 0 ||
+    if(wire_recv_int(netFd, &datalength) != sizeof(datalength) ||
+       datalength < 6 || datalength >= (int)sizeof(cmd) ||
        recvn(netFd, cmd, datalength) != datalength)
+    {
+        return EXIT_FAILURE;
+    }
+    if(memchr(cmd, '\0', datalength) != NULL)
     {
         return EXIT_FAILURE;
     }
@@ -64,11 +85,11 @@ int handle_long_cmd(int netFd, int user_id)
     
     // printf("cmd = %s\n", cmd);
     
-    if (strncmp("puts", cmd, 3) == 0)
+    if (strncmp("puts ", cmd, 5) == 0)
     {
-        Download(netFd, user_id);
+        return Download(netFd, user_id);
     }
-    else//gets
+    else if(strncmp("gets ", cmd, 5) == 0)//gets
     {
         char file[100] = {0};
         int i = 4;
@@ -76,9 +97,17 @@ int handle_long_cmd(int netFd, int user_id)
         {
             ++i;
         }
+        if(datalength - i <= 0 || datalength - i >= (int)sizeof(file))
+        {
+            return EXIT_FAILURE;
+        }
         strcpy(file, cmd + i);
         // printf("file = %s\n", file);
-        Upload(netFd, file, user_id);
+        return Upload(netFd, file, user_id);
+    }
+    else
+    {
+        return EXIT_FAILURE;
     }
     return 0;
 }

@@ -8,6 +8,7 @@
 code/client/config/client.conf
 code/server/config/server.conf
 code/server/config/database.env
+code/server/config/token.key
 .env
 .env.*
 

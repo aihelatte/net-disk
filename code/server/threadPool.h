@@ -7,6 +7,7 @@
 typedef struct task_s{
     int code;
     int netFd;
+    int64_t queuedAt;// 排队期间也有等待上限
     struct task_s *pNext;
 } task_t;
 
@@ -30,9 +31,11 @@ typedef struct threadPool_s{
 // 线程池创建和传递命令所用函数
 int taskEnqueue(taskQueue_t *pTaskQueue, int code, int netFd);
 int taskDequeue(taskQueue_t *pTaskQueue);
+void taskQueueExpire(taskQueue_t *pTaskQueue, int64_t now);
 int threadPoolInit(threadPool_t *pThreadPool, int workerNum);
 int epollAdd(int fd, int epfd);
 int epollDel(int fd, int epfd);
+int epollMod(int fd, int epfd, uint32_t events);
 int tcpInit(int *pSockFd, char *file);
 int makeWorker(threadPool_t *pThreadPool);
 

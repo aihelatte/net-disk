@@ -1,65 +1,112 @@
 #include"threadPool.h"
 #include "worker.h"
 
+// 路径总长与组件数量分别检查，保留.、..和~的现有语义
+static int split_path(char *path, char **words, int capacity)
+{
+    int count = 0;
+    char *save;
+    char *part = strtok_r(path, "/", &save);
+    while(part != NULL)
+    {
+        if(count == capacity)
+        {
+            return -1;
+        }
+        words[count++] = part;
+        part = strtok_r(NULL, "/", &save);
+    }
+    return count;
+}
+
+// 返回上一层时同步更新显示路径，根目录保持~/
+static void parent_pwd(char *pwd)
+{
+    size_t length = strlen(pwd);
+    while(length > 2 && pwd[length - 1] == '/')
+    {
+        pwd[--length] = '\0';
+    }
+    char *last = strrchr(pwd, '/');
+    if(last != NULL && last != pwd + 1)
+    {
+        *last = '\0';
+    }
+    else
+    {
+        strcpy(pwd, "~/");
+    }
+}
+
 //添加日志
 int sysadd(int user_id, char *cmd)
 {
     time_t now = time(NULL);
-    struct tm *pTm = localtime(&now);
+    struct tm tm;
+    struct tm *pTm = localtime_r(&now, &tm);
+    if(pTm == NULL)
+    {
+        return -1;
+    }
     char user_name[100] = {0};
-    get_user_name(user_name, user_id);
+    if(get_user_name(user_name, user_id) != 0)
+    {
+        return -1;
+    }
     syslog(LOG_INFO,"%4d%2d%2d %2d:%2d:%2d user:%s %s\n",
             pTm->tm_year+1900,pTm->tm_mon+1,pTm->tm_mday, pTm->tm_hour, pTm->tm_min, pTm->tm_sec,
             user_name, cmd);
+    return 0;
 }
     
 
-int do_cd(char *dir_name, int netFd, int user_id)
+int do_cd(char *dir_name, connection_t *pConnection, int user_id)
 {
     // 不考虑目标目录地址以/开头，这种情况直接报错
     int check = 0;
     if(dir_name[0] == '/')
     {
         check = 1;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
         return 0;
     }
     int code;
     int parent_code;
-    get_user_code(user_id, &code);// 获得本用户的当前目录编号
+    if(get_user_code(user_id, &code) != 0)
+    {
+        return -1;
+    }// 获得本用户的当前目录编号
     parent_code = code;
     char pwd[1024] = {0};
-    get_user_pwd(user_id, pwd);
+    if(get_user_pwd(user_id, pwd) != 0)
+    {
+        return -1;
+    }
     char *words[20] = {0};
     int i = 0;
-    char s[100] = {0};
+    char s[1024] = {0};
     // 如果是..就返回上级目录
     if(strcmp(dir_name, "..") == 0 || strcmp(dir_name, "../") == 0)
     {
         if(code == 0)// 已经在根目录，不能返回上级
         {
             check = 1;
-            sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+            if(wire_queue_int(pConnection, check) != sizeof(check))
+            {
+                return -1;
+            }
             return 0;
         }
-        get_parent_id(code, &parent_code);
+        if(get_parent_id(code, &parent_code) != 0)
+        {
+            return -1;
+        }
         code = parent_code;
 
-        // 切分当前路径
-        strcpy(s, pwd);
-        words[i] = strtok(s, "/");
-        ++i;
-        while ((words[i] = strtok(NULL, "/")) != NULL)
-        {
-            ++i;
-        }
-        char type[2];
-        bzero(pwd, sizeof(pwd));
-        for(int j = 0; j < i - 1; ++j)
-        {
-            strcat(pwd, words[j]);
-            strcat(pwd, "/");
-        }
+        parent_pwd(pwd);
     }
     else if(strcmp(dir_name, "~/") == 0 || strcmp(dir_name, "~") == 0)// 回到根目录
     {
@@ -73,11 +120,11 @@ int do_cd(char *dir_name, int netFd, int user_id)
         bzero(s, sizeof(s));
         bzero(words, sizeof(words));
         strcpy(s, dir_name);
-        words[i] = strtok(s, "/");
-        ++i;
-        while ((words[i] = strtok(NULL, "/")) != NULL)
+        i = split_path(s, words, sizeof(words) / sizeof(words[0]));
+        if(i <= 0)
         {
-            ++i;
+            check = 1;
+            return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
         }
 
         for (int j = 0; j < i; ++j)
@@ -89,6 +136,7 @@ int do_cd(char *dir_name, int netFd, int user_id)
             if (strcmp(words[j], "~") == 0)
             {
                 parent_code = code = 0;
+                strcpy(pwd, "~/");
                 continue;
             }
             if (strcmp(words[j], "..") == 0)
@@ -96,11 +144,18 @@ int do_cd(char *dir_name, int netFd, int user_id)
                 if (code == 0) // 已经在根目录，不能返回上级
                 {
                     check = 1;
-                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    if(wire_queue_int(pConnection, check) != sizeof(check))
+                    {
+                        return -1;
+                    }
                     return 0;
                 }
-                get_parent_id(code, &parent_code);
+                if(get_parent_id(code, &parent_code) != 0)
+                {
+                    return -1;
+                }
                 code = parent_code;
+                parent_pwd(pwd);
                 continue;
             }
             // printf("%s\n", words[j]);
@@ -109,10 +164,20 @@ int do_cd(char *dir_name, int netFd, int user_id)
             if (ret != 0 || strcmp(type, "d") != 0)  // 文件查找失败；不是目录文件；不在可搜索路径下
             {
                 check = 1;
-                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                if(wire_queue_int(pConnection, check) != sizeof(check))
+                {
+                    return -1;
+                }
                 return 0;
             }
-            if (parent_code != 0)
+            int separator = strlen(pwd) > 0 && pwd[strlen(pwd) - 1] != '/';
+            size_t needed = strlen(pwd) + strlen(words[j]) + separator;
+            if(needed >= sizeof(((train_t*)0)->buf))
+            {
+                check = 1;
+                return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
+            }
+            if (separator)
             {
                 strcat(pwd, "/");
             }
@@ -121,16 +186,25 @@ int do_cd(char *dir_name, int netFd, int user_id)
         }
     }
     // printf("pwd = %s, code = %d\n", pwd, code);
-    update_user_pwd(user_id, pwd, code);
-    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    if(strlen(pwd) >= sizeof(((train_t*)0)->buf) || update_user_pwd(user_id, pwd, code) != 0)
+    {
+        return -1;
+    }
+    if(wire_queue_int(pConnection, check) != sizeof(check))
+    {
+        return -1;
+    }
     train_t train;
     train.length = strlen(pwd);
     strcpy(train.buf, pwd);
-    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    if(wire_queue_train(pConnection, &train) != (int)sizeof(train.length) + train.length)
+    {
+        return -1;
+    }
     return 0;
 }
 
-int do_ls(char *file_name, int netFd, int user_id)
+int do_ls(char *file_name, connection_t *pConnection, int user_id)
 {
     // puts("ls");
     // 查看当前目录
@@ -139,12 +213,18 @@ int do_ls(char *file_name, int netFd, int user_id)
     int parent_code;
     int check = 0;
     char type[2];
-    get_user_code(user_id, &code);// 获得当前所在目录的id
+    if(get_user_code(user_id, &code) != 0)
+    {
+        return -1;
+    }// 获得当前所在目录的id
     parent_code = code;
     if(file_name[0] == '/')
     {
         check = 1;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
         return 0;
     }
     if(strlen(file_name) == 0 || strcmp(file_name, ".") == 0 || strcmp(file_name, "./") == 0)
@@ -155,20 +235,29 @@ int do_ls(char *file_name, int netFd, int user_id)
     else// 与cd一样的判断
     {
         char pwd[1024] = {0};
-        get_user_pwd(user_id, pwd);
+        if(get_user_pwd(user_id, pwd) != 0)
+        {
+            return -1;
+        }
         char *words[20] = {0};
         int i = 0;
-        char s[100] = {0};
+        char s[1024] = {0};
         // 是..的情况
         if (strcmp(file_name, "..") == 0 || strcmp(file_name, "../") == 0)
         {
             if (code == 0) // 已经在根目录，不能返回上级
             {
                 check = 1;
-                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                if(wire_queue_int(pConnection, check) != sizeof(check))
+                {
+                    return -1;
+                }
                 return 0;
             }
-            get_parent_id(code, &parent_code);
+            if(get_parent_id(code, &parent_code) != 0)
+            {
+                return -1;
+            }
             code = parent_code;
         }
         // 不是..就去往目的地址
@@ -178,11 +267,11 @@ int do_ls(char *file_name, int netFd, int user_id)
             bzero(s, sizeof(s));
             bzero(words, sizeof(words));
             strcpy(s, file_name);
-            words[i] = strtok(s, "/");
-            ++i;
-            while ((words[i] = strtok(NULL, "/")) != NULL)
+            i = split_path(s, words, sizeof(words) / sizeof(words[0]));
+            if(i <= 0)
             {
-                ++i;
+                check = 1;
+                return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
             }
 
             for (int j = 0; j < i; ++j)
@@ -201,10 +290,16 @@ int do_ls(char *file_name, int netFd, int user_id)
                     if (code == 0) // 已经在根目录，不能返回上级
                     {
                         check = 1;
-                        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                        if(wire_queue_int(pConnection, check) != sizeof(check))
+                        {
+                            return -1;
+                        }
                         return 0;
                     }
-                    get_parent_id(code, &parent_code);
+                    if(get_parent_id(code, &parent_code) != 0)
+                    {
+                        return -1;
+                    }
                     code = parent_code;
                     continue;
                 }
@@ -215,7 +310,10 @@ int do_ls(char *file_name, int netFd, int user_id)
                 if (ret != 0 || strcmp(type, "d") != 0)  // 文件查找失败；不是目录文件；不在可搜索路径下
                 {
                     check = 1;
-                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    if(wire_queue_int(pConnection, check) != sizeof(check))
+                    {
+                        return -1;
+                    }
                     return 0;
                 }
                 parent_code = code; // 继续往下遍历，遍历结束code就是要浏览的目录的文件id
@@ -223,38 +321,53 @@ int do_ls(char *file_name, int netFd, int user_id)
         }
     }
     printf("code = %d\n", code);
-    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    if(wire_queue_int(pConnection, check) != sizeof(check))
+    {
+        return -1;
+    }
     //code为最后文件夹的code，直接发送他的所有文件
-    find_code_files(netFd, code, user_id);// 把找到的文件发给客户端
+    return find_code_files(pConnection, code, user_id);// 把找到的文件发给客户端
 
 }
 
-int do_pwd(char *file_name, int user_id, int netFd)
+int do_pwd(char *file_name, int user_id, connection_t *pConnection)
 {
     // puts("pwd");
     char pwd[1024] = {0};
-    get_user_pwd(user_id, pwd);
+    if(get_user_pwd(user_id, pwd) != 0)
+    {
+        return -1;
+    }
     printf("pwd : %s\n", pwd);
     train_t train;
     train.length = strlen(pwd);
     strcpy(train.buf, pwd);
-    sendn(netFd, &train, sizeof(train.length) + train.length, MSG_NOSIGNAL);
+    if(wire_queue_train(pConnection, &train) != (int)sizeof(train.length) + train.length)
+    {
+        return -1;
+    }
+    return 0;
 }
 
-int do_rm(char *file_name, int user_id, int netFd)
+int do_rm(char *file_name, int user_id, connection_t *pConnection)
 {
     puts("rm");
     int code;
     int parent_code;
     char type[2] = {0};
-    char file[100] = {0};
     int check = 0;
-    get_user_code(user_id, &code);// 获得当前所在目录的id
+    if(get_user_code(user_id, &code) != 0)
+    {
+        return -1;
+    }// 获得当前所在目录的id
     parent_code = code;
     if(file_name[0] == '/' || strcmp(file_name, ".") == 0 || strcmp(file_name, "~/") == 0 || strcmp(file_name, "./") == 0 || strcmp(file_name, "..") == 0 || strcmp(file_name, "../") == 0)
     {
         check = 1;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
         return 0;
     }
     else// 不是以上几种情况就遍历获得要删除的文件的id和类型
@@ -262,15 +375,20 @@ int do_rm(char *file_name, int user_id, int netFd)
         // 将目标地址切分
         char *words[20] = {0};
         int i = 0;
-        char s[100] = {0};
+        char s[1024] = {0};
         strcpy(s, file_name);
-        words[i] = strtok(s, "/");
-        ++i;
-        while ((words[i] = strtok(NULL, "/")) != NULL)
+        i = split_path(s, words, sizeof(words) / sizeof(words[0]));
+        if(i <= 0)
         {
-            ++i;
+            check = 1;
+            return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
         }
 
+        if(strcmp(words[i - 1], ".") == 0 || strcmp(words[i - 1], "..") == 0 || strcmp(words[i - 1], "~") == 0)
+        {
+            check = 1;
+            return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
+        }
         for (int j = 0; j < i; ++j)
         {
             if (strcmp(words[j], ".") == 0)
@@ -287,10 +405,16 @@ int do_rm(char *file_name, int user_id, int netFd)
                 if (code == 0) // 已经在根目录，不能返回上级
                 {
                     check = 1;
-                    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                    if(wire_queue_int(pConnection, check) != sizeof(check))
+                    {
+                        return -1;
+                    }
                     return 0;
                 }
-                get_parent_id(code, &parent_code);
+                if(get_parent_id(code, &parent_code) != 0)
+                {
+                    return -1;
+                }
                 code = parent_code;
                 continue;
             }
@@ -298,10 +422,13 @@ int do_rm(char *file_name, int user_id, int netFd)
             
             int ret = get_file_code(user_id, words[j], &code, parent_code, type); // 获取当前文件在虚拟文件目录的id和类型
             //printf("ret = %d\n", ret);
-            if(ret != 0)// 路径错误
+            if(ret != 0 || (j != i - 1 && strcmp(type, "d") != 0))// 路径错误
             {
                 check = 1;
-                sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+                if(wire_queue_int(pConnection, check) != sizeof(check))
+                {
+                    return -1;
+                }
                 return 0;
             }
             if(j != i-1)
@@ -309,34 +436,43 @@ int do_rm(char *file_name, int user_id, int netFd)
                 parent_code = code; // 继续往下遍历，遍历结束code就是要浏览的目录的文件id
             }
         }
-        strcpy(file, words[i - 1]);
     }
     if(code == 0)
     {
         check = 1;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
         return 0;
     }
     // printf("code = %d\n", code);
-    //如果删除的对象是文件属性，要根据md5值使其连接数减1
-    if(strcmp(type, "f") == 0)
+    if(del_virtual_file(code, user_id) != 0)
     {
-        char md5_str[MD5_STR_LEN + 1] = {0};
-        //获取文件的md5值
-        get_virtual_file_md5(file, user_id, parent_code, md5_str);// 要先查询再删除
-        minus_link(md5_str);// 本地文件链接数减一
+        return -1;
     }
-    del_virtual_file(code, user_id);// 先查询后删除
-    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    if(wire_queue_int(pConnection, check) != sizeof(check))
+    {
+        return -1;
+    }
+    return 0;
 }
 
-int do_mkdir(char *dir_name, int netFd, int user_id)
+int do_mkdir(char *dir_name, connection_t *pConnection, int user_id)
 {
     // puts("mkdir");
+    if(!is_valid_file_name(dir_name, strlen(dir_name)))
+    {
+        int check = 1;
+        return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
+    }
     int check = 0;
     int code;
     //获取当前所在目录的code
-    get_user_code(user_id, &code);
+    if(get_user_code(user_id, &code) != 0)
+    {
+        return -1;
+    }
     // printf("code = %d\n", code);
     int test;
     char type[2] = {0};
@@ -345,15 +481,25 @@ int do_mkdir(char *dir_name, int netFd, int user_id)
     if(ret == 0)
     {
         check = 1;
-        sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+        if(wire_queue_int(pConnection, check) != sizeof(check))
+        {
+            return -1;
+        }
         return 0;
     }
+    if(ret < 0)
+    {
+        return -1;
+    }
     check = add_virtual_dir(code, dir_name, user_id);
-    sendn(netFd, &check, sizeof(check), MSG_NOSIGNAL);
+    if(wire_queue_int(pConnection, check) != sizeof(check))
+    {
+        return -1;
+    }
     return 0;
 }
 
-int handle_short_cmd(train_state_t train_get, int netFd, int user_id)
+int handle_short_cmd(train_state_t train_get, connection_t *pConnection, int user_id)
 {
     sysadd(user_id, train_get.buf);
     char file_name[100] = {0};
@@ -362,26 +508,31 @@ int handle_short_cmd(train_state_t train_get, int netFd, int user_id)
     {
         ++i;
     }
+    if(i > train_get.length || train_get.length - i >= (int)sizeof(file_name))
+    {
+        return -1;
+    }
     strcpy(file_name, train_get.buf + i);
 
     if (strncmp("cd", train_get.buf, 2) == 0)
     {
-        do_cd(file_name, netFd, user_id);
+        return do_cd(file_name, pConnection, user_id);
     }
     else if (strncmp("ls", train_get.buf, 2) == 0)
     {
-        do_ls(file_name, netFd, user_id);
+        return do_ls(file_name, pConnection, user_id);
     }
     else if (strncmp("pwd", train_get.buf, 3) == 0)
     {
-        do_pwd(file_name, user_id, netFd);
+        return do_pwd(file_name, user_id, pConnection);
     }
     else if (strncmp("rm", train_get.buf, 2) == 0)
     {
-        do_rm(file_name, user_id, netFd);
+        return do_rm(file_name, user_id, pConnection);
     }
     else if (strncmp("mkdir", train_get.buf, 5) == 0)
     {
-        do_mkdir(file_name, netFd, user_id);
+        return do_mkdir(file_name, pConnection, user_id);
     }
+    return -1;
 }

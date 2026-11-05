@@ -1,43 +1,150 @@
-#include "../l8w8jwt/include/l8w8jwt/encode.h"
-#include "../l8w8jwt/include/l8w8jwt/decode.h"
+#include "threadPool.h"
 #include "worker.h"
-#include <myhead.h>
 
-int encode(char *key, char *user_name, char *token)
+int receive_token(int sockFd, char *token, int64_t *pDeadline)
 {
-    char* jwt;
-    size_t jwt_length;
-
-    struct l8w8jwt_encoding_params params;
-    l8w8jwt_encoding_params_init(&params);
-
-    params.alg = L8W8JWT_ALG_HS512;
-
-    params.sub = user_name;
-    // params.iss = "Black Mesa";
-    //params.aud = "Administrator";
-
-    params.iat = time(NULL);
-    params.exp = time(NULL) + 600; /* Set to expire after 10 minutes (600 seconds). */
-
-    params.secret_key = (unsigned char*)key;
-    params.secret_key_length = strlen(params.secret_key);
-
-    params.out = &jwt;
-    params.out_length = &jwt_length;
-
-    int r = l8w8jwt_encode(&params);
-
-    // printf("strlen(jwd) = %lu\n", strlen(jwt));
-    // printf("\n l8w8jwt example HS512 token: %s \n", r == L8W8JWT_SUCCESS ? jwt : " (encoding failure) ");
-    if(r != L8W8JWT_SUCCESS)
+    int length;
+    int lifetime;
+    int64_t now = network_time_ms();
+    if(now < 0 || wire_recv_int(sockFd, &length) != sizeof(length) ||
+       length <= 0 || !protocol_valid_text_length(length, PROTOCOL_TOKEN_CAPACITY) ||
+       recvn(sockFd, token, length) != length ||
+       memchr(token, '\0', length) != NULL ||
+       wire_recv_int(sockFd, &lifetime) != sizeof(lifetime) ||
+       lifetime != TOKEN_LIFETIME)
     {
-        printf("encoding failure\n");
-        return EXIT_FAILURE;
+        return -1;
     }
-    strcpy(token, jwt);
-    /* Always free the output jwt string! */
-    l8w8jwt_free(jwt);
+    token[length] = '\0';
+    *pDeadline = now + (int64_t)lifetime * 1000;// 仅用于提前续签，服务端负责最终有效期校验
+    return 0;
+}
 
+void close_token(threadPool_t *pThreadPool)
+{
+    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+    pThreadPool->tokenState = TOKEN_CLOSED;
+    pthread_cond_broadcast(&pThreadPool->tokenCond);
+    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+}
+
+int get_token(threadPool_t *pThreadPool, char *token,
+              unsigned long *pVersion, int forceRefresh)
+{
+    int64_t now = network_time_ms();
+    if(now < 0)
+    {
+        return -1;
+    }
+    int64_t deadline = now + NETWORK_IDLE_TIMEOUT_MS;
+    struct timespec timeout;
+    timeout.tv_sec = deadline / 1000;
+    timeout.tv_nsec = (deadline % 1000) * 1000000;
+
+    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+    while(pThreadPool->tokenState != TOKEN_CLOSED)
+    {
+        if(forceRefresh && *pVersion != pThreadPool->tokenVersion)
+        {
+            forceRefresh = 0;// 每次唤醒后重查，避免同一代凭证重复续签
+        }
+        now = network_time_ms();
+        if(now < 0)
+        {
+            break;
+        }
+        if(pThreadPool->tokenState == TOKEN_READY && !forceRefresh &&
+           now + TOKEN_REFRESH_MARGIN_MS < pThreadPool->tokenDeadline)
+        {
+            strcpy(token, pThreadPool->token);
+            *pVersion = pThreadPool->tokenVersion;
+            pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+            return 0;
+        }
+        if(pThreadPool->tokenState == TOKEN_READY)
+        {
+            pThreadPool->tokenState = TOKEN_REQUESTED;
+            pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+            ssize_t ret;
+            do
+            {
+                ret = write(pThreadPool->tokenPipe[1], "1", 1);
+            }while(ret == -1 && errno == EINTR);
+            int notifyFailed = ret != 1 && !(ret == -1 && errno == EAGAIN);
+            pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+            if(notifyFailed)
+            {
+                break;
+            }
+            forceRefresh = 0;
+            continue;
+        }
+        int ret = pthread_cond_timedwait(&pThreadPool->tokenCond,
+                                         &pThreadPool->taskQueue.mutex, &timeout);
+        if(ret != 0)
+        {
+            break;
+        }
+    }
+    pThreadPool->tokenState = TOKEN_CLOSED;
+    pthread_cond_broadcast(&pThreadPool->tokenCond);
+    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+    return -1;
+}
+
+// 只有主线程调用，控制连接的请求和回复保持串行
+int refresh_token(int sockFd, threadPool_t *pThreadPool)
+{
+    char buf[64];
+    ssize_t ret;
+    do
+    {
+        ret = read(pThreadPool->tokenPipe[0], buf, sizeof(buf));
+    }while(ret > 0 || (ret == -1 && errno == EINTR));
+    if(ret == 0 || (ret == -1 && errno != EAGAIN))
+    {
+        close_token(pThreadPool);
+        return -1;
+    }
+    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+    if(pThreadPool->tokenState != TOKEN_REQUESTED)
+    {
+        int closed = pThreadPool->tokenState == TOKEN_CLOSED;
+        pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+        return closed ? -1 : 0;
+    }
+    pThreadPool->tokenState = TOKEN_REFRESHING;
+    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+
+    train_state_t train;
+    bzero(&train, sizeof(train));
+    train.state = REFRESH;
+    train.length = 7;
+    train.pre_length = 7;
+    memcpy(train.buf, "refresh", train.length);
+    int length = sizeof(train.length) + sizeof(train.state) +
+                 sizeof(train.pre_length) + train.length;
+    int reply;
+    char token[PROTOCOL_TOKEN_CAPACITY];
+    int64_t deadline;
+    if(wire_send_command(sockFd, &train, MSG_NOSIGNAL) != length ||
+       wire_recv_int(sockFd, &reply) != sizeof(reply) ||
+       reply != TOKEN_REFRESH_REPLY || receive_token(sockFd, token, &deadline) != 0)
+    {
+        close_token(pThreadPool);
+        return -1;
+    }
+    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+    if(pThreadPool->tokenState != TOKEN_REFRESHING)
+    {
+        pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+        return -1;
+    }
+    strcpy(pThreadPool->token, token);
+    pThreadPool->tokenDeadline = deadline;
+    ++pThreadPool->tokenVersion;
+    pThreadPool->tokenState = TOKEN_READY;
+    pthread_cond_broadcast(&pThreadPool->tokenCond);
+    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
     return 0;
 }

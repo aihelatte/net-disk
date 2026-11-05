@@ -8,7 +8,7 @@ int exitPipe[2];
 static int is_valid_train_header(const train_state_t *pTrain)
 {
     if(!protocol_valid_text_length(pTrain->length, sizeof(pTrain->buf)) ||
-       pTrain->state < REGISTER || pTrain->state > TOKEN ||
+       pTrain->state < REGISTER || pTrain->state > REFRESH ||
        !protocol_valid_pre_length(pTrain->length, pTrain->pre_length))
     {
         return 0;
@@ -48,6 +48,10 @@ static int is_valid_train_header(const train_state_t *pTrain)
                                          pTrain->pre_length,
                                          PROTOCOL_USER_NAME_CAPACITY,
                                          PROTOCOL_TOKEN_CAPACITY);
+    case KEEPALIVE:
+        return pTrain->length == 4 && pTrain->pre_length == 4;
+    case REFRESH:
+        return pTrain->length == 7 && pTrain->pre_length == 7;
     default:
         return 0;
     }
@@ -57,6 +61,10 @@ static int is_valid_train_body(const train_state_t *pTrain)
 {
     switch(pTrain->state)
     {
+    case KEEPALIVE:
+        return strcmp(pTrain->buf, "ping") == 0;
+    case REFRESH:
+        return strcmp(pTrain->buf, "refresh") == 0;
     case REGISTER:
     case LOGIN:
     case TOKEN:
@@ -81,45 +89,226 @@ static int is_valid_train_body(const train_state_t *pTrain)
     }
 }
 
-static void close_invalid_connection(int netFd, int epfd, const char *reason)
+static void release_connection(int netFd, clientQueue_t *pclientQueue)
 {
-    fprintf(stderr, "Invalid protocol message: fd=%d, reason=%s\n", netFd, reason);
+    connection_t *pConnection = pclientQueue->connections[netFd];
+    if(pConnection != NULL)
+    {
+        free(pConnection->sendBuf);
+        free(pConnection);
+        pclientQueue->connections[netFd] = NULL;
+    }
+}
+
+static void close_client_connection(int netFd, int epfd, clientQueue_t *pclientQueue)
+{
+    fdDel(netFd, pclientQueue);
+    int user_id = pclientQueue->client[netFd];
+    pclientQueue->client[netFd] = -1;
+    release_connection(netFd, pclientQueue);
     epollDel(netFd, epfd);
     close(netFd);
+    if(user_id >= 0 && update_user_pwd(user_id, "~/", 0) != 0)
+    {
+        fprintf(stderr, "Failed to reset user directory.\n");
+    }
 }
+
+static void close_invalid_connection(int netFd, int epfd, clientQueue_t *pclientQueue, const char *reason)
+{
+    fprintf(stderr, "Invalid protocol message: fd=%d, reason=%s\n", netFd, reason);
+    close_client_connection(netFd, epfd, pclientQueue);
+}
+static void reset_request(connection_t *pConnection)
+{
+    bzero(&pConnection->train, sizeof(pConnection->train));
+    pConnection->received = 0;
+    pConnection->needed = sizeof(int);
+}
+
+// 一次只收当前帧需要的字节，避免吞掉随后交给工作线程的文件命令
+static int receive_request(connection_t *pConnection, int *progress)
+{
+    while(1)
+    {
+        ssize_t ret = recv(pConnection->netFd,
+                           (char *)&pConnection->train + pConnection->received,
+                           pConnection->needed - pConnection->received,
+                           MSG_DONTWAIT);
+        if(ret > 0)
+        {
+            *progress = 1;
+            pConnection->received += ret;
+            if(pConnection->received < pConnection->needed)
+            {
+                continue;
+            }
+            if(pConnection->received == sizeof(int))
+            {
+                int length = wire_get_i32(&pConnection->train.length);
+                pConnection->train.length = length;
+                if(pConnection->stage == RECEIVE_COMMAND)
+                {
+                    if(length <= 0 || !protocol_valid_text_length(length, sizeof(pConnection->train.buf)))
+                    {
+                        return -1;
+                    }
+                    pConnection->needed = 3 * sizeof(int);
+                }
+                else
+                {
+                    if(length != 49)
+                    {
+                        return -1;
+                    }
+                    pConnection->needed = sizeof(int) + length;
+                }
+                continue;
+            }
+            if(pConnection->stage == RECEIVE_COMMAND &&
+               pConnection->received == 3 * sizeof(int))
+            {
+                pConnection->train.state = wire_get_i32(&pConnection->train.state);
+                pConnection->train.pre_length = wire_get_i32(&pConnection->train.pre_length);
+                if(!is_valid_train_header(&pConnection->train))
+                {
+                    return -1;
+                }
+                pConnection->needed = 3 * sizeof(int) + pConnection->train.length;
+                continue;
+            }
+            if(pConnection->stage == RECEIVE_COMMAND)
+            {
+                pConnection->train.buf[pConnection->train.length] = '\0';
+                if(memchr(pConnection->train.buf, '\0', pConnection->train.length) != NULL ||
+                   !is_valid_train_body(&pConnection->train))
+                {
+                    return -1;
+                }
+            }
+            else if(memchr((char *)&pConnection->train + sizeof(int), '\0', 49) != NULL)
+            {
+                return -1;
+            }
+            return 1;
+        }
+        if(ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        {
+            return 0;// 半包保留在连接中，回到epoll处理其他连接
+        }
+        return -1;
+    }
+}
+
+static int dispatch_request(connection_t *pConnection, clientQueue_t *pclientQueue)
+{
+    if(pConnection->stage == RECEIVE_REGISTER_PASSWORD)
+    {
+        return register_user(pConnection);
+    }
+    if(pConnection->stage == RECEIVE_LOGIN_PASSWORD)
+    {
+        return login(pConnection, pclientQueue);
+    }
+    train_state_t train_get = pConnection->train;
+    int user_id = pclientQueue->client[pConnection->netFd];
+    if((((train_get.state >= LS && train_get.state <= PUTS) ||
+         train_get.state == KEEPALIVE || train_get.state == REFRESH) && user_id < 0) ||
+       ((train_get.state == REGISTER || train_get.state == LOGIN || train_get.state == TOKEN) && user_id >= 0))
+    {
+        return -1;
+    }
+    switch(train_get.state)
+    {
+    case REGISTER:
+        return register_user(pConnection);
+    case LOGIN:
+        return login(pConnection, pclientQueue);
+    case LS:
+    case CD:
+    case PWD:
+    case REMOVE:
+    case MKDIR:
+        return handle_short_cmd(train_get, pConnection, user_id);
+    case PUTS:
+    case GETS:
+    case KEEPALIVE:
+        return 0;
+    case REFRESH:
+        return refresh_token(pConnection);
+    case TOKEN:
+    {
+        int user_id = token(pConnection, pclientQueue);
+        if(user_id == -2)
+        {
+            return -1;
+        }
+        pConnection->transfer_user_id = user_id;
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+static int handoff_connection(int netFd, int epfd, clientQueue_t *pclientQueue,
+                              threadPool_t *pThreadPool)
+{
+    connection_t *pConnection = pclientQueue->connections[netFd];
+    if(epollDel(netFd, epfd) != 0)
+    {
+        return -1;
+    }
+    fdDel(netFd, pclientQueue);
+    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
+    int ret = taskEnqueue(&pThreadPool->taskQueue, pConnection->transfer_user_id, netFd);
+    if(ret == 0)
+    {
+        release_connection(netFd, pclientQueue);
+        pthread_cond_signal(&pThreadPool->taskQueue.cond);
+    }
+    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+    return ret;
+}
+
 void sigFunc(int signum)
 {
-    // printf("signum = %d\n", signum);
-    write(exitPipe[1], "1", 1);
-    // printf("Parent process is going to die!\n");
-}
-void sigFunc2(int signum)
-{
-    
+    int savedErrno = errno;
+    ssize_t ret;
+    do
+    {
+        ret = write(exitPipe[1], "1", 1);
+    } while(ret == -1 && errno == EINTR);
+    errno = savedErrno;
 }
 int main(int argc, char *argv[])
 {
+    signal(SIGPIPE, SIG_IGN);
+    if(init_token_key() != 0)
+    {
+        fprintf(stderr, "Failed to load token signing key.\n");
+        return EXIT_FAILURE;
+    }
     //管理一个客户端断开的管道
-    pipe(exitPipe);
-    //if (fork() != 0) // 父进程实现退出
-    //{
-    //    close(exitPipe[0]);
-    //    signal(SIGUSR1, sigFunc);
-    //    signal(SIGINT, sigFunc);
-    //    wait(NULL);
-    //    exit(0);
-    //}
-    //signal(SIGINT, sigFunc2);
-    //close(exitPipe[1]);
+    if(pipe(exitPipe) == -1)
+    {
+        return EXIT_FAILURE;
+    }
     // 制作子线程
     int workerNum = NUM;
     threadPool_t threadPool;
-    threadPoolInit(&threadPool, workerNum);
-    makeWorker(&threadPool);
+    if(threadPoolInit(&threadPool, workerNum) != 0 || makeWorker(&threadPool) != 0)
+    {
+        fprintf(stderr, "Failed to initialize thread pool.\n");
+        return EXIT_FAILURE;
+    }
     
     // 绑定ip和端口号
     int sockFd;
-    tcpInit(&sockFd, "./config/server.conf"); // 以读取config文件的形式建立连接
+    if(tcpInit(&sockFd, "./config/server.conf") != 0)
+    {
+        return EXIT_FAILURE;
+    } // 以读取config文件的形式建立连接
 
     //定义要监听的集合
     int epfd = epoll_create(1);
@@ -133,170 +322,250 @@ int main(int argc, char *argv[])
     }
 
     // 初始化本地文件表（用于秒传），确保数据库信息和本地信息一致
-    init_local_file();
+    if(init_local_file() != 0)
+    {
+        fprintf(stderr, "Failed to initialize local files.\n");
+        return EXIT_FAILURE;
+    }
 
     // 开始监听
-    epollAdd(sockFd, epfd);// 监听连接请求
-    epollAdd(exitPipe[0], epfd); // 监听退出请求
+    if(epfd == -1 || socket_nonblock(sockFd) != 0 || socket_nonblock(exitPipe[1]) != 0 ||
+       epollAdd(sockFd, epfd) != 0 || epollAdd(exitPipe[0], epfd) != 0)
+    {
+        close(sockFd);
+        return EXIT_FAILURE;
+    }
+    struct sigaction action;
+    bzero(&action, sizeof(action));
+    action.sa_handler = sigFunc;
+    sigemptyset(&action.sa_mask);
+    if(sigaction(SIGINT, &action, NULL) == -1 ||
+       sigaction(SIGTERM, &action, NULL) == -1 ||
+       sigaction(SIGUSR1, &action, NULL) == -1)
+    {
+        perror("sigaction");
+        return EXIT_FAILURE;
+    }
     struct epoll_event readyArr[3];
     int ret;
-    time_t timeStart, timeEnd;
+    struct timespec tick;
+    if(clock_gettime(CLOCK_MONOTONIC, &tick) == -1)
+    {
+        return EXIT_FAILURE;
+    }
+    int64_t lastTick = (int64_t)tick.tv_sec * 1000 + tick.tv_nsec / 1000000;
     while (1)
     {
+        if(clock_gettime(CLOCK_MONOTONIC, &tick) == -1)
+        {
+            return EXIT_FAILURE;
+        }
+        int64_t waitNow = (int64_t)tick.tv_sec * 1000 + tick.tv_nsec / 1000000;
+        int64_t remaining = lastTick + 100 - waitNow;
+        int waitTime = remaining > 0 ? (int)remaining : 0;
         // printf("epoll_wait!\n");
-        int readyNum = epoll_wait(epfd, readyArr, 3, 100);// 每0.1s醒来一次，对已连接的客户端等待时间-1
+        int readyNum = epoll_wait(epfd, readyArr, 3, waitTime);// 等到下一格到期，已到期则立即返回
         // printf("epoll_wait ready!\n");
 
-        // 当前无就绪事件，查看集合内是否是否有连接需要超时断开
-        if(readyNum == 0)
+        if(readyNum == -1 && errno != EINTR)
         {
-            if(clientQueue.time_out[clientQueue.timer].size != 0)
+            perror("epoll_wait");
+            return EXIT_FAILURE;
+        }
+        if(readyNum == -1)
+        {
+            readyNum = 0;
+        }
+        int exiting = 0;
+        for(int i = 0; i < readyNum; ++i)
+        {
+            if(readyArr[i].data.fd == exitPipe[0])
             {
-                slotNode_t *cur = clientQueue.time_out[clientQueue.timer].head;
-                int netFd;
-                while(cur != NULL)// 队列不为空则关闭队列中的所有netFd
+                exiting = 1;
+                break;
+            }
+        }
+        if(exiting)
+        {
+            break;
+        }
+        if(clock_gettime(CLOCK_MONOTONIC, &tick) == -1)
+        {
+            return EXIT_FAILURE;
+        }
+        int64_t now = (int64_t)tick.tv_sec * 1000 + tick.tv_nsec / 1000000;
+        while(now - lastTick >= 100)// 每经过100ms推进一格，与是否有事件无关
+        {
+            pthread_mutex_lock(&threadPool.taskQueue.mutex);
+            taskQueueExpire(&threadPool.taskQueue, now);
+            pthread_mutex_unlock(&threadPool.taskQueue.mutex);
+            while(clientQueue.time_out[clientQueue.timer].head != NULL)
+            {
+                int netFd = clientQueue.time_out[clientQueue.timer].head->netFd;
+                connection_t *pConnection = clientQueue.connections[netFd];
+                if(clientQueue.client[netFd] >= 0 && pConnection->sendSize == 0 &&
+                   pConnection->received == 0)// 只向空闲控制连接发送超时通知
                 {
-                    netFd = cur->netFd;
-                    sendn(netFd, "1", 1, MSG_NOSIGNAL);
-                    cur = cur->next;
-                    // fdDel(netFd, &clientQueue);// 在退出那里删了，就不需要重复删了
+                    unsigned char check[4];
+                    wire_put_i32(check, 1);
+                    // 通知尽力发送，清理不依赖客户端回应，也不等待发送缓冲区
+                    send(netFd, check, sizeof(check), MSG_NOSIGNAL | MSG_DONTWAIT);
+                }
+                close_client_connection(netFd, epfd, &clientQueue);
+                for(int i = 0; i < readyNum; ++i)
+                {
+                    if(readyArr[i].data.fd == netFd)
+                    {
+                        readyArr[i].data.fd = -1;
+                    }
                 }
             }
             clientQueue.timer = (clientQueue.timer + 1) % TIME_SLICE;
+            lastTick += 100;
         }
 
         for (int i = 0; i < readyNum; ++i)
         {
+            if(readyArr[i].data.fd == -1)
+            {
+                continue;
+            }
             if (readyArr[i].data.fd == sockFd)// 监听到建立连接请求
             {
-                int netFd = accept(sockFd, NULL, NULL);
-                if(netFd == -1)
+                // 监听socket也为非阻塞，每次事件最多接受32个连接
+                for(int accepted = 0; accepted < 32; ++accepted)
                 {
-                    perror("accept");
-                    continue;
+                    int netFd = accept(sockFd, NULL, NULL);
+                    if(netFd == -1)
+                    {
+                        if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                        {
+                            perror("accept");
+                        }
+                        break;
+                    }
+                    if((size_t)netFd >= clientQueue.fd_capacity || socket_nonblock(netFd) != 0)
+                    {
+                        close(netFd);
+                        continue;
+                    }
+                    connection_t *pConnection = calloc(1, sizeof(connection_t));
+                    if(pConnection == NULL)
+                    {
+                        close(netFd);
+                        continue;
+                    }
+                    pConnection->netFd = netFd;
+                    pConnection->transfer_user_id = -1;
+                    reset_request(pConnection);
+                    clientQueue.connections[netFd] = pConnection;
+                    clientQueue.client[netFd] = -1;
+                    if(epollAdd(netFd, epfd) != 0)
+                    {
+                        release_connection(netFd, &clientQueue);
+                        close(netFd);
+                        continue;
+                    }
+                    if(fdAdd(netFd, &clientQueue) != 0)
+                    {
+                        close_client_connection(netFd, epfd, &clientQueue);
+                    }
                 }
-                if((size_t)netFd >= clientQueue.fd_capacity)
-                {
-                    fprintf(stderr, "File descriptor is out of range: fd=%d\n", netFd);
-                    close(netFd);
-                    continue;
-                }
-                // 将连接加入监听
-                epollAdd(netFd, epfd);
             }
-            else if (readyArr[i].data.fd == exitPipe[0]) // 监听到退出
-            {
-                // printf("child process, threadPool is going to die!\n");
-                threadPool.exitFlag = 1;
-                pthread_cond_broadcast(&threadPool.taskQueue.cond); // 叫醒所有线程
-                for (int j = 0; j < workerNum; ++j)
-                {
-                    pthread_join(threadPool.tid[j], NULL); // 等待子线程终结
-                }
-                pthread_exit(NULL);
-            }
-            else// 监听到客户端的消息
+            else// 监听到客户端的消息或回复可以继续发送
             {
                 int netFd = readyArr[i].data.fd;
-                printf("netFd = %d\n", netFd);
-                
-                //命令版tlv协议数据单元
-                train_state_t train_get;
-                bzero(&train_get, sizeof(train_get));
-                ret = recvn(netFd, &train_get.length, sizeof(int));
-                
-                // printf("datalength = %d, ret = %d\n", train_get.length, ret);
-                if(ret != sizeof(int) || train_get.length == 0)// 发现客户端退出了
+                connection_t *pConnection = clientQueue.connections[netFd];
+                if(pConnection == NULL)
                 {
-                    char uName[100] = {0};
-                    get_user_name(uName,clientQueue.client[netFd]);//netfd-->user_id-->user_name
-                    printf("User %s leave!\n", uName);
-                    fdDel(netFd, &clientQueue);// 把该netFd从轮盘中删除
-                    update_user_pwd(clientQueue.client[netFd], "~/", 0);// 退出的时候客户退回根目录
-                    clientQueue.client[netFd] = -1;     //哈希槽填-1
-                    epollDel(netFd, epfd);// 从监听中去除
-                    // clientDequeue(&clientQueue, netFd);// 客户端从队列中删除
-                    close(netFd);
-                    break;
-                }
-                if(!protocol_valid_text_length(train_get.length, sizeof(train_get.buf)))
-                {
-                    close_invalid_connection(netFd, epfd, "invalid length");
                     continue;
                 }
-                if(recvn(netFd, &train_get.state, sizeof(int)) != sizeof(int) ||
-                   recvn(netFd, &train_get.pre_length, sizeof(int)) != sizeof(int))
+                if(readyArr[i].events & (EPOLLERR | EPOLLHUP))
                 {
-                    close_invalid_connection(netFd, epfd, "incomplete message header");
+                    close_client_connection(netFd, epfd, &clientQueue);
                     continue;
                 }
-                if(!is_valid_train_header(&train_get))
+                if(pConnection->sendSize == 0 && (readyArr[i].events & EPOLLIN))
                 {
-                    close_invalid_connection(netFd, epfd, "invalid header fields");
-                    continue;
-                }
-                if(recvn(netFd, train_get.buf, train_get.length) != train_get.length)
-                {
-                    close_invalid_connection(netFd, epfd, "incomplete message body");
-                    continue;
-                }
-                train_get.buf[train_get.length] = '\0';
-                if(!is_valid_train_body(&train_get))
-                {
-                    close_invalid_connection(netFd, epfd, "state and body mismatch");
-                    continue;
-                }
-                // printf("train.buf = %s\n", train_get.buf);
-
-                switch(train_get.state)
-                {
-                case REGISTER:
-                    register_user(train_get, netFd);
-                    break;
-                case LOGIN:
-                    ret = login(train_get, netFd, &clientQueue);
-                    if(ret == 0)
+                    int progress = 0;
+                    ret = receive_request(pConnection, &progress);
+                    if(ret < 0 || (progress && fdAdd(netFd, &clientQueue) != 0))
                     {
-                        fdAdd(netFd, &clientQueue);// 登录成功开始计时
+                        close_invalid_connection(netFd, epfd, &clientQueue, "incomplete or invalid message");
+                        continue;
                     }
-                    // clientQueue.time_out[netFd] = 5;// 登录成功后也需要重置等待时间
-                    break;
-                case LS:
-                case CD:
-                case PWD:
-                case REMOVE:
-                case MKDIR:
-                    // 收到客户端发来的命令，先删掉再添加，重置时间
-                    fdDel(netFd, &clientQueue);
-                    fdAdd(netFd, &clientQueue);
-                    handle_short_cmd(train_get, netFd, clientQueue.client[netFd]);
-                    break;
-                case PUTS:
-                case GETS:
-                    fdDel(netFd, &clientQueue);
-                    fdAdd(netFd, &clientQueue);
-                    break;
-                case TOKEN:
-                    // 验证token值，成功返回对应客户端在队列中的位置
-                    //返回值同时也提供user_id
-                    ret = token(train_get, netFd);
-                    if(ret != -1)// 验证成功，唤醒子线程
+                    if(ret == 1)
                     {
-                        //这是客户端的子线程数据连接，服务端主线程不再监听
-                        epollDel(netFd, epfd);
-                        pthread_mutex_lock(&threadPool.taskQueue.mutex);
-                        taskEnqueue(&threadPool.taskQueue, ret, netFd);// 把user_id 和 netFd 传给子线程
-                        printf("Time to work!\n");
-                        //可以唤醒所有队列
-                        pthread_cond_signal(&threadPool.taskQueue.cond);
-                        pthread_mutex_unlock(&threadPool.taskQueue.mutex);
+                        if(dispatch_request(pConnection, &clientQueue) != 0)
+                        {
+                            close_invalid_connection(netFd, epfd, &clientQueue, "command failed or is not allowed");
+                            continue;
+                        }
+                        reset_request(pConnection);
                     }
-                default:
-                    break;
+                }
+                if(pConnection->sendSize != 0)
+                {
+                    ret = flush_reply(pConnection);
+                    if(ret < 0 || (ret > 0 && fdAdd(netFd, &clientQueue) != 0))
+                    {
+                        close_client_connection(netFd, epfd, &clientQueue);
+                        continue;
+                    }
+                }
+                // Token回复全部发出后才交接，工作线程不会与主线程同时收发
+                if(pConnection->sendSize == 0 && pConnection->transfer_user_id >= 0)
+                {
+                    if(handoff_connection(netFd, epfd, &clientQueue, &threadPool) != 0)
+                    {
+                        close_client_connection(netFd, epfd, &clientQueue);
+                    }
+                    continue;
+                }
+                uint32_t events = pConnection->sendSize == 0 ? EPOLLIN : EPOLLOUT;
+                if(epollMod(netFd, epfd, events) != 0)
+                {
+                    close_client_connection(netFd, epfd, &clientQueue);
                 }
             }
         }
     }
+
+    close(sockFd);// 不再接受新连接
+    pthread_mutex_lock(&threadPool.taskQueue.mutex);
+    threadPool.exitFlag = 1;
+    while(threadPool.taskQueue.pFront != NULL)
+    {
+        int netFd = threadPool.taskQueue.pFront->netFd;
+        taskDequeue(&threadPool.taskQueue);
+        close(netFd);
+    }
+    pthread_cond_broadcast(&threadPool.taskQueue.cond);
+    pthread_mutex_unlock(&threadPool.taskQueue.mutex);
+    for(int i = 0; i < workerNum; ++i)
+    {
+        pthread_join(threadPool.tid[i], NULL);
+    }
+    for(size_t i = 0; i < clientQueue.fd_capacity; ++i)
+    {
+        if(clientQueue.connections[i] != NULL)
+        {
+            close_client_connection((int)i, epfd, &clientQueue);
+        }
+    }
+    free(clientQueue.client);
+    free(clientQueue.index);
+    free(clientQueue.connections);
+    free(threadPool.tid);
+    pthread_cond_destroy(&threadPool.taskQueue.cond);
+    pthread_mutex_destroy(&threadPool.taskQueue.mutex);
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+    signal(SIGUSR1, SIG_IGN);
+    close(exitPipe[0]);
+    close(exitPipe[1]);
+    close(epfd);
+    return 0;
 }
 
 //初始化threadPoll结构体
@@ -304,11 +573,27 @@ int threadPoolInit(threadPool_t *pThreadPool, int workerNum)
 {
     pThreadPool->threadNum = workerNum;
     pThreadPool->tid = (pthread_t *)calloc(workerNum, sizeof(pthread_t));
+    if(pThreadPool->tid == NULL)
+    {
+        return -1;
+    }
     pThreadPool->taskQueue.pFront = NULL;
     pThreadPool->taskQueue.pRear = NULL;
     pThreadPool->taskQueue.size = 0;
     //初始化锁和条件变量
-    pthread_mutex_init(&pThreadPool->taskQueue.mutex, NULL);
-    pthread_cond_init(&pThreadPool->taskQueue.cond, NULL);
+    int ret = pthread_mutex_init(&pThreadPool->taskQueue.mutex, NULL);
+    if(ret != 0)
+    {
+        free(pThreadPool->tid);
+        return -1;
+    }
+    ret = pthread_cond_init(&pThreadPool->taskQueue.cond, NULL);
+    if(ret != 0)
+    {
+        pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
+        free(pThreadPool->tid);
+        return -1;
+    }
     pThreadPool->exitFlag = 0;
+    return 0;
 }

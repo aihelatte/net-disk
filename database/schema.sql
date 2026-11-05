@@ -17,10 +17,13 @@ CREATE TABLE IF NOT EXISTS client_info (
 
 CREATE TABLE IF NOT EXISTS local_files (
     id INT AUTO_INCREMENT,
-    real_file_name VARCHAR(255),
+    real_file_name VARCHAR(255) NOT NULL,
     link_num INT,
-    md5 CHAR(40),
-    PRIMARY KEY (id)
+    md5 CHAR(40) NOT NULL,
+    upload_complete INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (id),
+    UNIQUE KEY (md5),
+    UNIQUE KEY (real_file_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 CREATE TABLE IF NOT EXISTS virtual_file (
@@ -29,7 +32,7 @@ CREATE TABLE IF NOT EXISTS virtual_file (
     filename VARCHAR(255),
     owner_id INT,
     md5 CHAR(40),
-    filesize INT,
+    filesize BIGINT,
     type CHAR(1),
     PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;

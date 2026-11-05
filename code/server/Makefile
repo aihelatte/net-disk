@@ -7,7 +7,7 @@ CC:=gcc
 MYSQL_CFLAGS:=$(shell mysql_config --cflags)
 MYSQL_LIBS:=$(shell mysql_config --libs)
 CPPFLAGS:=-I../include $(MYSQL_CFLAGS)
-CFLAGS:=-g
+CFLAGS:=-g -Wall -Wextra -Wpedantic -Werror=return-type
 LDFLAGS:=-L../l8w8jwt/bin/release
 $(out):$(OBJS)
 	$(CC) $^ -o $@ $(LDFLAGS) -pthread -lcrypt $(MYSQL_LIBS) -ll8w8jwt -lmbedcrypto -lmbedx509 -g
