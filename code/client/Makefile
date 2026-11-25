@@ -1,16 +1,22 @@
 #通用Makefile
 out:=client#可执行文件名称需要根据需要更改
-SRCS:=$(wildcard *.c)#拿到当前目录下所有的.c文件
-OBJS:=$(patsubst %.c,%.o,$(SRCS))#把.c文件替换为.o文件
+SRCS:=$(wildcard *.cpp)
+OBJS:=$(patsubst %.cpp,%.cpp.o,$(SRCS))
 #预定义变量
-CC:=gcc
+CXX:=g++
 CPPFLAGS:=-I../include
-CFLAGS:=-g -Wall -Wextra -Wpedantic -Werror=return-type
+CXXFLAGS:=-std=c++17 -MMD -MP -g -Wall -Wextra -Wpedantic -Werror=return-type
 LDFLAGS:=-L../l8w8jwt/bin/release
 $(out):$(OBJS)
-	$(CC) $^ -o $@ $(LDFLAGS) -pthread -lcrypt -ll8w8jwt -lmbedcrypto -lmbedx509 -g
+	$(CXX) $^ -o $@ $(LDFLAGS) -pthread -lcrypt -ll8w8jwt -lmbedcrypto -lmbedx509 -g
 
-#.PHONY:clean rebuild
-rebuild:clean $(out)
+%.cpp.o:%.cpp
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+.PHONY:clean rebuild
+rebuild: clean
+	$(MAKE) $(out)
 clean:
-	rm -rf $(OBJS) $(out)
+	rm -f $(OBJS) $(OBJS:.o=.d) $(out)
+
+-include $(OBJS:.o=.d)

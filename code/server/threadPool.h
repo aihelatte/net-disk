@@ -1,42 +1,53 @@
 #ifndef _THREADPOOL_H// 头文件在编译时被多次引用，避免重复定义
 #define _THREADPOOL_H
 #include<myhead.h>
+#include <queue>
+#include <vector>
 #include "worker.h"
 
 //一个任务单元结构体
-typedef struct task_s{
+struct task_t {
     int code;
     int netFd;
-    int64_t queuedAt;// 排队期间也有等待上限
-    struct task_s *pNext;
-} task_t;
+    int64_t queuedAt;
+};
 
-//任务队列，以及其互斥访问
-typedef struct taskQueue_s{
-    task_t *pFront;
-    task_t *pRear;
-    int size;
+// 调用方在同一把锁下检查退出状态、等待条件和操作队列。
+class TaskQueue {
+public:
+    bool empty() const { return tasks.empty(); }
+    const task_t &front() const { return tasks.front(); }
+    void pop() { tasks.pop(); }
+    int push(int code, int netFd);
+    void expire(int64_t now);
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-} taskQueue_t;
+private:
+    std::queue<task_t> tasks;
+};
 
 //线程池
-typedef struct threadPool_s{
-    pthread_t *tid;
-    int threadNum;
-    taskQueue_t taskQueue;
+class ThreadPool {
+public:
+    ThreadPool() = default;
+    ThreadPool(const ThreadPool &) = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
+    int start(int workerNum);
+    void stop();
+    ~ThreadPool() { stop(); }
+    TaskQueue taskQueue;
     int exitFlag;       //当前线程池是否结束运行
-} threadPool_t;
+private:
+    int initialize(int workerNum);
+    int createWorkers();
+    bool running = false;
+    std::vector<pthread_t> tid;
+    int threadNum = 0;
+};
 
-// 线程池创建和传递命令所用函数
-int taskEnqueue(taskQueue_t *pTaskQueue, int code, int netFd);
-int taskDequeue(taskQueue_t *pTaskQueue);
-void taskQueueExpire(taskQueue_t *pTaskQueue, int64_t now);
-int threadPoolInit(threadPool_t *pThreadPool, int workerNum);
 int epollAdd(int fd, int epfd);
 int epollDel(int fd, int epfd);
 int epollMod(int fd, int epfd, uint32_t events);
-int tcpInit(int *pSockFd, char *file);
-int makeWorker(threadPool_t *pThreadPool);
+int tcpInit(int *pSockFd, const char *file);
 
 #endif

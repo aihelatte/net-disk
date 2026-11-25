@@ -73,18 +73,11 @@ int do_cd(char *dir_name, connection_t *pConnection, int user_id)
         }
         return 0;
     }
-    int code;
+    int code = pConnection->directoryId;
     int parent_code;
-    if(get_user_code(user_id, &code) != 0)
-    {
-        return -1;
-    }// 获得本用户的当前目录编号
     parent_code = code;
-    char pwd[1024] = {0};
-    if(get_user_pwd(user_id, pwd) != 0)
-    {
-        return -1;
-    }
+    char pwd[sizeof(pConnection->directoryPath)];
+    strcpy(pwd, pConnection->directoryPath);
     char *words[20] = {0};
     int i = 0;
     char s[1024] = {0};
@@ -186,10 +179,8 @@ int do_cd(char *dir_name, connection_t *pConnection, int user_id)
         }
     }
     // printf("pwd = %s, code = %d\n", pwd, code);
-    if(strlen(pwd) >= sizeof(((train_t*)0)->buf) || update_user_pwd(user_id, pwd, code) != 0)
-    {
-        return -1;
-    }
+    pConnection->directoryId = code;
+    strcpy(pConnection->directoryPath, pwd);
     if(wire_queue_int(pConnection, check) != sizeof(check))
     {
         return -1;
@@ -209,14 +200,10 @@ int do_ls(char *file_name, connection_t *pConnection, int user_id)
     // puts("ls");
     // 查看当前目录
     // printf("file_name lth = %ld\n", strlen(file_name));
-    int code;
+    int code = pConnection->directoryId;
     int parent_code;
     int check = 0;
     char type[2];
-    if(get_user_code(user_id, &code) != 0)
-    {
-        return -1;
-    }// 获得当前所在目录的id
     parent_code = code;
     if(file_name[0] == '/')
     {
@@ -234,11 +221,6 @@ int do_ls(char *file_name, connection_t *pConnection, int user_id)
     }
     else// 与cd一样的判断
     {
-        char pwd[1024] = {0};
-        if(get_user_pwd(user_id, pwd) != 0)
-        {
-            return -1;
-        }
         char *words[20] = {0};
         int i = 0;
         char s[1024] = {0};
@@ -330,14 +312,10 @@ int do_ls(char *file_name, connection_t *pConnection, int user_id)
 
 }
 
-int do_pwd(char *file_name, int user_id, connection_t *pConnection)
+int do_pwd(connection_t *pConnection)
 {
     // puts("pwd");
-    char pwd[1024] = {0};
-    if(get_user_pwd(user_id, pwd) != 0)
-    {
-        return -1;
-    }
+    const char *pwd = pConnection->directoryPath;
     printf("pwd : %s\n", pwd);
     train_t train;
     train.length = strlen(pwd);
@@ -352,14 +330,10 @@ int do_pwd(char *file_name, int user_id, connection_t *pConnection)
 int do_rm(char *file_name, int user_id, connection_t *pConnection)
 {
     puts("rm");
-    int code;
+    int code = pConnection->directoryId;
     int parent_code;
     char type[2] = {0};
     int check = 0;
-    if(get_user_code(user_id, &code) != 0)
-    {
-        return -1;
-    }// 获得当前所在目录的id
     parent_code = code;
     if(file_name[0] == '/' || strcmp(file_name, ".") == 0 || strcmp(file_name, "~/") == 0 || strcmp(file_name, "./") == 0 || strcmp(file_name, "..") == 0 || strcmp(file_name, "../") == 0)
     {
@@ -467,12 +441,8 @@ int do_mkdir(char *dir_name, connection_t *pConnection, int user_id)
         return wire_queue_int(pConnection, check) == sizeof(check) ? 0 : -1;
     }
     int check = 0;
-    int code;
+    int code = pConnection->directoryId;
     //获取当前所在目录的code
-    if(get_user_code(user_id, &code) != 0)
-    {
-        return -1;
-    }
     // printf("code = %d\n", code);
     int test;
     char type[2] = {0};
@@ -524,7 +494,7 @@ int handle_short_cmd(train_state_t train_get, connection_t *pConnection, int use
     }
     else if (strncmp("pwd", train_get.buf, 3) == 0)
     {
-        return do_pwd(file_name, user_id, pConnection);
+        return do_pwd(pConnection);
     }
     else if (strncmp("rm", train_get.buf, 2) == 0)
     {

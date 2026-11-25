@@ -1,3 +1,4 @@
+#include "file_descriptor.h"
 #include"threadPool.h"
 #include"worker.h"
 // TCP是一种字节流传输，信息无边界，对方接收时以最大字节数为界限
@@ -37,14 +38,9 @@ int writen(int fd, const void *pstart, int len)
     return total;
 }
 
-int Upload(int netFd, char *file, int user_id)
+int Upload(int netFd, char *file, int user_id, int code)
 {
     // 打开文件之前需要先获取文件在本地的真实名称
-    int code;
-    if(get_user_code(user_id, &code) != 0)
-    {
-        return EXIT_FAILURE;
-    }
     char md5_str[MD5_STR_LEN + 1] = {0};
     
     //找到对应文件的md5值
@@ -63,6 +59,7 @@ int Upload(int netFd, char *file, int user_id)
         return EXIT_FAILURE;
     }
     int fd = open_in_root("NetDisk", real_file_name, O_RDONLY, 0);// 打开本地文件
+    FileDescriptor localFile(fd);
     train_t train;
     char *name = strrchr(file, '/');
     if(name == NULL)
@@ -77,7 +74,7 @@ int Upload(int netFd, char *file, int user_id)
     {
         if(fd != -1)
         {
-            close(fd);
+            localFile.reset();
             errno = EINVAL;
         }
         perror("open");
@@ -87,12 +84,10 @@ int Upload(int netFd, char *file, int user_id)
         return EXIT_FAILURE;
     }
     // 发送文件名(虚拟文件表中存的文件名，客户端下载到本地也用这个名字)；
-    // 后序与普通下载文件没有区别，客户端本地下载不存在秒传，默认下载的文件本地没有，且客户端本地的下载做了检查，文件存在则会将指针偏移到文件结尾
     if(flock(fd, LOCK_SH | LOCK_NB) == -1)// 避免读取另一个任务正在接收的文件
     {
         int length = 0;
         wire_send_int(netFd, length, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
     // 上传完成并且物理文件大小一致时，才能供客户端下载
@@ -105,7 +100,6 @@ int Upload(int netFd, char *file, int user_id)
     {
         int length = 0;
         wire_send_int(netFd, length, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
     train.length = strlen(name);
@@ -113,7 +107,6 @@ int Upload(int netFd, char *file, int user_id)
     int ret = wire_send_train(netFd, &train, MSG_NOSIGNAL);
     if(ret != (int)sizeof(train.length) + train.length)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     
@@ -123,7 +116,13 @@ int Upload(int netFd, char *file, int user_id)
     wire_put_i64(train.buf, fileSize);
     if(wire_send_train(netFd, &train, MSG_NOSIGNAL) != (int)sizeof(train.length) + train.length)
     {
-        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    train.length = MD5_STR_LEN;
+    memcpy(train.buf, md5_str, train.length);
+    if(wire_send_train(netFd, &train, MSG_NOSIGNAL) != (int)sizeof(train.length) + train.length)
+    {
         return EXIT_FAILURE;
     }
 
@@ -131,12 +130,10 @@ int Upload(int netFd, char *file, int user_id)
     int64_t exitSize = 0;
     if(wire_recv_i64(netFd, &exitSize) != sizeof(exitSize))
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     if(exitSize < 0 || exitSize > fileSize)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
 
@@ -167,7 +164,6 @@ int Upload(int netFd, char *file, int user_id)
             {
                 continue;
             }
-            close(fd);
             return EXIT_FAILURE;
         }
     }
@@ -180,7 +176,6 @@ int Upload(int netFd, char *file, int user_id)
             if(p == MAP_FAILED)
             {
                 perror("mmap");
-                close(fd);
                 return EXIT_FAILURE;
             }
         }
@@ -201,7 +196,6 @@ int Upload(int netFd, char *file, int user_id)
             if(wire_send_train(netFd, &train, MSG_NOSIGNAL) != (int)sizeof(train.length) + train.length)
             {
                 munmap(p, fileSize);
-                close(fd);
                 return EXIT_FAILURE;
             }
         }
@@ -214,7 +208,6 @@ int Upload(int netFd, char *file, int user_id)
             {
                 munmap(p, fileSize);
             }
-            close(fd);
             return EXIT_FAILURE;
         }
         if(fileSize > 0)
@@ -223,9 +216,16 @@ int Upload(int netFd, char *file, int user_id)
         }
     }
 
-    close(fd);
+    localFile.reset();
     int total_time;
-    if(wire_recv_int(netFd, &total_time) != sizeof(int))
+    do
+    {
+        if(wire_recv_int(netFd, &total_time) != sizeof(int))
+        {
+            return EXIT_FAILURE;
+        }
+    } while(total_time == TRANSFER_VERIFY_PROGRESS);
+    if(total_time < 0)
     {
         return EXIT_FAILURE;
     }
@@ -233,7 +233,7 @@ int Upload(int netFd, char *file, int user_id)
     return 0;
 }
 
-int Download(int sockFd, int user_id)
+int Download(int sockFd, int user_id, int code)
 {
     // 先获取文件名，不同客户端传的文件可能文件名相同但文件内容不同，所以根据md5值来判断本地是否有该文件
     char name[1024] = {0};
@@ -275,13 +275,7 @@ int Download(int sockFd, int user_id)
         return EXIT_FAILURE;
     }
 
-    // 获取当前目录id
     if(fileSize < 0)
-    {
-        return EXIT_FAILURE;
-    }
-    int code;
-    if(get_user_code(user_id, &code) != 0)
     {
         return EXIT_FAILURE;
     }
@@ -297,6 +291,7 @@ int Download(int sockFd, int user_id)
     int complete = 0;
     int ret = prepare_upload(code, name, user_id, md5_str, fileSize,
                              real_name, &fd, &complete);
+    FileDescriptor localFile(fd);
     if(ret == 1)
     {
         int check = 2;
@@ -311,7 +306,6 @@ int Download(int sockFd, int user_id)
     if(fstat(fd, &statbuf) == -1)
     {
         perror("fstat");
-        close(fd);
         return EXIT_FAILURE;
     }
     exitSize = statbuf.st_size;
@@ -319,20 +313,17 @@ int Download(int sockFd, int user_id)
     {
         if(set_local_file_status(md5_str, real_name, 0) != 0)
         {
-            close(fd);
             return EXIT_FAILURE;
         }
         complete = 0;
     }
     if(exitSize < 0 || exitSize > fileSize)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     int check = complete == 1 ? 0 : 1;
     if(wire_send_int(sockFd, check, MSG_NOSIGNAL) != sizeof(int))
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     if(check == 0)// 完整文件直接秒传
@@ -341,7 +332,6 @@ int Download(int sockFd, int user_id)
         double elapsed = difftime(timeEnd, timeBeg);
         int total_time = elapsed < 0 ? 0 : elapsed > INT_MAX ? INT_MAX : (int)elapsed;
         printf("total time = %ds\n", total_time);
-        close(fd);
         return wire_send_int(sockFd, total_time, MSG_NOSIGNAL) == sizeof(int) ? 0 : EXIT_FAILURE;
     }
     // 未完成的满长度文件可能尚未通过校验，重新从头接收
@@ -350,7 +340,6 @@ int Download(int sockFd, int user_id)
         if(ftruncate(fd, 0) == -1)
         {
             perror("ftruncate");
-            close(fd);
             return EXIT_FAILURE;
         }
         exitSize = 0;
@@ -358,13 +347,11 @@ int Download(int sockFd, int user_id)
     // 发送本地文件大小
     if(wire_send_i64(sockFd, exitSize, MSG_NOSIGNAL) != sizeof(exitSize))
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     //偏移到末尾，进行续传
     if(lseek(fd, exitSize, SEEK_SET) == -1)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
 
@@ -375,7 +362,6 @@ int Download(int sockFd, int user_id)
         if((int64_t)(off_t)fileSize != fileSize || (uint64_t)fileSize > SIZE_MAX ||
            ftruncate(fd, fileSize) == -1)
         {
-            close(fd);
             return EXIT_FAILURE;
         }
         char *p = (char *)mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -386,7 +372,6 @@ int Download(int sockFd, int user_id)
             {
                 perror("ftruncate");
             }
-            close(fd);
             return EXIT_FAILURE;
         }
         // total只记录已经完整接收的连续块，失败时当前块由下次重传
@@ -409,7 +394,6 @@ int Download(int sockFd, int user_id)
                 {
                     perror("ftruncate");
                 }
-                close(fd);
                 return EXIT_FAILURE;
             }
             total += recvLength;
@@ -427,7 +411,7 @@ int Download(int sockFd, int user_id)
             ret = wire_recv_int(sockFd, &dataLength);
             if(ret != sizeof(int))// 对面连接断开或长度没有接收完整
             {
-                close(fd);
+                localFile.reset();
                 timeEnd = time(NULL);
                 int total_time = timeEnd - timeBeg;
                 printf("total time = %ds\n", total_time);
@@ -437,7 +421,6 @@ int Download(int sockFd, int user_id)
             {
                 if(total != fileSize)
                 {
-                    close(fd);
                     return EXIT_FAILURE;
                 }
                 timeEnd = time(NULL);
@@ -446,14 +429,12 @@ int Download(int sockFd, int user_id)
             if(dataLength < 0 || dataLength > (int)sizeof(buf) ||
                dataLength > fileSize - total || recvn(sockFd, buf, dataLength) != dataLength)
             {
-                close(fd);
                 return EXIT_FAILURE;
             }
             //写到文件对象中
             ret = writen(fd, buf, dataLength);
             if(ret != dataLength)
             {
-                close(fd);
                 return EXIT_FAILURE;
             }
             total += dataLength;
@@ -465,7 +446,6 @@ int Download(int sockFd, int user_id)
     {
         int failure = TRANSFER_VERIFY_FAILED;
         wire_send_int(sockFd, failure, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
     if(fstat(fd, &statbuf) == -1)
@@ -473,7 +453,6 @@ int Download(int sockFd, int user_id)
         perror("fstat");
         int failure = TRANSFER_VERIFY_FAILED;
         wire_send_int(sockFd, failure, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
     if(statbuf.st_size != fileSize || strcasecmp(actual_md5, md5_str) != 0)
@@ -484,7 +463,6 @@ int Download(int sockFd, int user_id)
         }
         int failure = TRANSFER_VERIFY_FAILED;
         wire_send_int(sockFd, failure, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
     // 校验通过才记录完成状态，失败时不向客户端报告上传成功
@@ -492,10 +470,9 @@ int Download(int sockFd, int user_id)
     {
         int failure = TRANSFER_VERIFY_FAILED;
         wire_send_int(sockFd, failure, MSG_NOSIGNAL);
-        close(fd);
         return EXIT_FAILURE;
     }
-    close(fd);
+    localFile.reset();
     timeEnd = time(NULL);
     double elapsed = difftime(timeEnd, timeBeg);
     int total_time = elapsed < 0 ? 0 : elapsed > INT_MAX ? INT_MAX : (int)elapsed;

@@ -84,28 +84,36 @@ static int read_command_line(char *buf, size_t capacity, int *length,
     return 0;
 }
 
-static void stop_workers(threadPool_t *pThreadPool)
+int ThreadPool::start(int workerNum)
 {
-    pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
-    pThreadPool->exitFlag = 1;
-    while(pThreadPool->taskQueue.size > 0)
+    if(running || workerNum <= 0 || initialize(workerNum) != 0)
+        return -1;
+    return createWorkers();
+}
+
+void ThreadPool::stop()
+{
+    if(!running) return;
+    running = false;
+    pthread_mutex_lock(&taskQueue.mutex);
+    exitFlag = 1;
+    while(!taskQueue.empty())
     {
-        taskDequeue(&pThreadPool->taskQueue);
-        --pThreadPool->pendingTasks;
+        taskQueue.pop();
+        --pendingTasks;
     }
-    pthread_cond_broadcast(&pThreadPool->taskQueue.cond);
-    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
-    close_token(pThreadPool);// 唤醒等待续签的线程，避免退出时卡在join
-    for(int i = 0; i < pThreadPool->threadNum; ++i)
+    pthread_cond_broadcast(&taskQueue.cond);
+    pthread_mutex_unlock(&taskQueue.mutex);
+    close_token(this);// 唤醒等待续签的线程，避免退出时卡在join
+    for(int i = 0; i < threadNum; ++i)
     {
-        pthread_join(pThreadPool->tid[i], NULL);
+        pthread_join(tid[i], NULL);
     }
-    free(pThreadPool->tid);
-    close(pThreadPool->tokenPipe[0]);
-    close(pThreadPool->tokenPipe[1]);
-    pthread_cond_destroy(&pThreadPool->tokenCond);
-    pthread_cond_destroy(&pThreadPool->taskQueue.cond);
-    pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
+    close(tokenPipe[0]);
+    close(tokenPipe[1]);
+    pthread_cond_destroy(&tokenCond);
+    pthread_cond_destroy(&taskQueue.cond);
+    pthread_mutex_destroy(&taskQueue.mutex);
 }
 
 int main()
@@ -148,9 +156,9 @@ int main()
 
     // 制作子线程
     int workerNum = NUM;
-    threadPool_t threadPool;
+    ThreadPool threadPool;
     //初始化线程池整个结构体
-    if(threadPoolInit(&threadPool, workerNum) != 0 || makeWorker(&threadPool) != 0)
+    if(threadPool.start(workerNum) != 0)
     {
         fprintf(stderr, "Failed to initialize thread pool.\n");
         return EXIT_FAILURE;
@@ -277,7 +285,7 @@ int main()
     }
 
     // 命令独立复制，Token单独共享并使用队列锁保护
-    server_t server;
+    TransferTask server;
     bzero(&server, sizeof(server));
     pthread_mutex_lock(&threadPool.taskQueue.mutex);
     strcpy(threadPool.token, token);
@@ -364,7 +372,7 @@ int main()
                 if(wire_recv_int(sockFd, &check) != sizeof(check) || check != 1)
                 {
                     close(sockFd);
-                    stop_workers(&threadPool);
+                    threadPool.stop();
                     close(epfd);
                     close(exitPipe[0]);
                     return EXIT_FAILURE;
@@ -376,7 +384,7 @@ int main()
                 train.length = 0;
                 wire_send_train(sockFd, &train, 0);
                 // printf("child process, threadPool is going to die!\n");
-                stop_workers(&threadPool);
+                threadPool.stop();
                 close(sockFd);
                 close(epfd);
                 close(exitPipe[0]);
@@ -388,7 +396,7 @@ int main()
                 {
                     printf("Token refresh failed, please login again.\n");
                     close(sockFd);
-                    stop_workers(&threadPool);
+                    threadPool.stop();
                     close(epfd);
                     close(exitPipe[0]);
                     return EXIT_FAILURE;
@@ -599,15 +607,15 @@ int main()
                     }
                 }
 
-                else if (strncmp("puts", cmd, 4) == 0)
+                else if (strncmp("puts", cmd, 4) == 0 || strncmp("gets", cmd, 4) == 0)
                 {
                     if (strlen(cmd) == 4 || strlen(cmd) >= sizeof(server.cmd) || cmd[4] != ' ' || cmd[4 + strspn(cmd + 4, " ")] == '\0')
                     {
                         printf("\033[1;31mwrong cmd!\033[0m\n");
                         continue;
                     }
-                    // 先发送命令重置一下时间
-                    train_state.state = PUTS;
+                    // 控制连接返回提交命令时的目录编号，任务入队后独立保存。
+                    train_state.state = cmd[0] == 'p' ? PUTS : GETS;
                     strcpy(train_state.buf, cmd);
                     train_state.length = strlen(cmd);
                     train_state.pre_length = 4;
@@ -616,43 +624,15 @@ int main()
                         close(sockFd);
                         return EXIT_FAILURE;
                     }
-                    // 唤醒子线程
-                    strcpy(server.cmd, cmd);
-                    pthread_mutex_lock(&threadPool.taskQueue.mutex);
-                    if(threadPool.pendingTasks == INT_MAX ||
-                       taskEnqueue(&threadPool.taskQueue, &server) != 0)
-                    {
-                        pthread_mutex_unlock(&threadPool.taskQueue.mutex);
-                        printf("\033[1;31mTask enqueue failed!\033[0m\n");
-                        continue;
-                    }
-                    ++threadPool.pendingTasks;
-                    pthread_cond_signal(&threadPool.taskQueue.cond); // 唤醒子线程
-                    pthread_mutex_unlock(&threadPool.taskQueue.mutex);
-                }
-
-                else if (strncmp("gets", cmd, 4) == 0)
-                {
-                    if (strlen(cmd) == 4 || strlen(cmd) >= sizeof(server.cmd) || cmd[4] != ' ' || cmd[4 + strspn(cmd + 4, " ")] == '\0')
-                    {
-                        printf("\033[1;31mwrong cmd!\033[0m\n");
-                        continue;
-                    }
-                    // 先发送命令重置一下时间
-                    train_state.state = GETS;
-                    strcpy(train_state.buf, cmd);
-                    train_state.length = strlen(cmd);
-                    train_state.pre_length = 4;
-                    if(wire_send_command(sockFd, &train_state, 0) != (int)(sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length))
+                    if(wire_recv_int(sockFd, &server.directoryId) != sizeof(int) || server.directoryId < 0)
                     {
                         close(sockFd);
                         return EXIT_FAILURE;
                     }
-                    // 唤醒子线程
                     strcpy(server.cmd, cmd);
                     pthread_mutex_lock(&threadPool.taskQueue.mutex);
                     if(threadPool.pendingTasks == INT_MAX ||
-                       taskEnqueue(&threadPool.taskQueue, &server) != 0)
+                       threadPool.taskQueue.push(server) != 0)
                     {
                         pthread_mutex_unlock(&threadPool.taskQueue.mutex);
                         printf("\033[1;31mTask enqueue failed!\033[0m\n");
@@ -672,7 +652,7 @@ int main()
             else// 退出
             {
                 // 等待活跃任务结束后再通知服务端关闭控制连接
-                stop_workers(&threadPool);
+                threadPool.stop();
                 train_t train;
                 bzero(&train, sizeof(train));
                 train.length = 0;
@@ -687,36 +667,31 @@ int main()
     close(sockFd);
     return 0;
 }
-int threadPoolInit(threadPool_t *pThreadPool, int workerNum)
+int ThreadPool::initialize(int workerNum)
 {
-    pThreadPool->threadNum = workerNum;
-    pThreadPool->tid = (pthread_t *)calloc(workerNum, sizeof(pthread_t));
-    if(pThreadPool->tid == NULL)
-    {
+    threadNum = workerNum;
+    try {
+        tid.resize(workerNum);
+    } catch(const std::bad_alloc &) {
         return -1;
     }
-    pThreadPool->taskQueue.pFront = NULL;
-    pThreadPool->taskQueue.pRear = NULL;
-    pThreadPool->taskQueue.size = 0;
-    int ret = pthread_mutex_init(&pThreadPool->taskQueue.mutex, NULL);
+    int ret = pthread_mutex_init(&taskQueue.mutex, NULL);
     if(ret != 0)
     {
-        free(pThreadPool->tid);
         return -1;
     }
-    ret = pthread_cond_init(&pThreadPool->taskQueue.cond, NULL);
+    ret = pthread_cond_init(&taskQueue.cond, NULL);
     if(ret != 0)
     {
-        pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
-        free(pThreadPool->tid);
+        pthread_mutex_destroy(&taskQueue.mutex);
         return -1;
     }
-    pThreadPool->exitFlag = 0;
-    pThreadPool->pendingTasks = 0;
-    pThreadPool->tokenState = TOKEN_CLOSED;
-    pThreadPool->tokenVersion = 0;
-    pThreadPool->tokenDeadline = 0;
-    pThreadPool->token[0] = '\0';
+    exitFlag = 0;
+    pendingTasks = 0;
+    tokenState = TOKEN_CLOSED;
+    tokenVersion = 0;
+    tokenDeadline = 0;
+    token[0] = '\0';
     pthread_condattr_t attr;
     ret = pthread_condattr_init(&attr);
     if(ret == 0)
@@ -724,34 +699,31 @@ int threadPoolInit(threadPool_t *pThreadPool, int workerNum)
         ret = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
         if(ret == 0)
         {
-            ret = pthread_cond_init(&pThreadPool->tokenCond, &attr);
+            ret = pthread_cond_init(&tokenCond, &attr);
         }
         pthread_condattr_destroy(&attr);
     }
     if(ret != 0)
     {
-        pthread_cond_destroy(&pThreadPool->taskQueue.cond);
-        pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
-        free(pThreadPool->tid);
+        pthread_cond_destroy(&taskQueue.cond);
+        pthread_mutex_destroy(&taskQueue.mutex);
         return -1;
     }
-    if(pipe(pThreadPool->tokenPipe) == -1)
+    if(pipe(tokenPipe) == -1)
     {
-        pthread_cond_destroy(&pThreadPool->tokenCond);
-        pthread_cond_destroy(&pThreadPool->taskQueue.cond);
-        pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
-        free(pThreadPool->tid);
+        pthread_cond_destroy(&tokenCond);
+        pthread_cond_destroy(&taskQueue.cond);
+        pthread_mutex_destroy(&taskQueue.mutex);
         return -1;
     }
-    if(socket_nonblock(pThreadPool->tokenPipe[0]) != 0 ||
-       socket_nonblock(pThreadPool->tokenPipe[1]) != 0)
+    if(socket_nonblock(tokenPipe[0]) != 0 ||
+       socket_nonblock(tokenPipe[1]) != 0)
     {
-        close(pThreadPool->tokenPipe[0]);
-        close(pThreadPool->tokenPipe[1]);
-        pthread_cond_destroy(&pThreadPool->tokenCond);
-        pthread_cond_destroy(&pThreadPool->taskQueue.cond);
-        pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
-        free(pThreadPool->tid);
+        close(tokenPipe[0]);
+        close(tokenPipe[1]);
+        pthread_cond_destroy(&tokenCond);
+        pthread_cond_destroy(&taskQueue.cond);
+        pthread_mutex_destroy(&taskQueue.mutex);
         return -1;
     }
     return 0;

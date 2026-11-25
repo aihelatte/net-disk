@@ -1,6 +1,6 @@
 #include "threadPool.h"
 // socket bind listen操作
-int tcpInit(int *pSockFd, char *file)
+int tcpInit(int *pSockFd, const char *file)
 {
     struct sockaddr_in addr;
     if(read_tcp_address(file, &addr) != 0)

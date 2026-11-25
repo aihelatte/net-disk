@@ -49,3 +49,4 @@ vgcore.*
 .DS_Store
 Thumbs.db
 Desktop.ini
+*.cpp.d

@@ -1,16 +1,17 @@
+#include "file_descriptor.h"
 #include"threadPool.h"
 #include "worker.h"
 // 优雅的退出，完成任务再退出
 void cleanFunc(void *arg)
 {
-    threadPool_t * pThreadPool = (threadPool_t*)arg;
+    ThreadPool * pThreadPool = (ThreadPool*)arg;
     pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
 }
 
 //线程池子线程入口函数
 void *handleEvent(void *arg)
 {
-    threadPool_t * pThreadPool = (threadPool_t*)arg;
+    ThreadPool * pThreadPool = (ThreadPool*)arg;
     int netFd;
     int user_id;
     while(1)
@@ -18,7 +19,7 @@ void *handleEvent(void *arg)
         printf("I am free!tid = %lu\n", pthread_self());
         pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
         pthread_cleanup_push(cleanFunc, (void*)pThreadPool);// 加锁后就push
-        while(pThreadPool->taskQueue.size == 0 && pThreadPool->exitFlag == 0)// wait条件需要更改，否则唤醒后又会wait
+        while(pThreadPool->taskQueue.empty() && pThreadPool->exitFlag == 0)// wait条件需要更改，否则唤醒后又会wait
         {
             pthread_cond_wait(&pThreadPool->taskQueue.cond, &pThreadPool->taskQueue.mutex);
         }
@@ -27,42 +28,42 @@ void *handleEvent(void *arg)
             // printf("I am going to die!\n");
             pthread_exit(NULL);
         }
-        netFd = pThreadPool->taskQueue.pFront->netFd;
-        user_id = pThreadPool->taskQueue.pFront->code;
-        taskDequeue(&pThreadPool->taskQueue);// 任务内容获取完成
+        netFd = pThreadPool->taskQueue.front().netFd;
+        user_id = pThreadPool->taskQueue.front().code;
+        pThreadPool->taskQueue.pop();// 任务内容获取完成
         pthread_cleanup_pop(1);// 原来解锁的位置改为pop
 
         printf("I am working! tid = %lu\n", pthread_self());
 
-        handle_long_cmd(netFd, user_id);// 开始处理命令，直接用netFd，监听客户端发来的命令，这个netFd是客户端子线程发来的
+        FileDescriptor connection(netFd);
+        handle_long_cmd(connection.get(), user_id);// 开始处理命令，直接用netFd，监听客户端发来的命令，这个netFd是客户端子线程发来的
 
         printf("done!\n");
-        close(netFd);
     }
 }
 //create线程
-int makeWorker(threadPool_t *pThreadPool)
+int ThreadPool::createWorkers()
 {
-    for(int i = 0; i < pThreadPool->threadNum; ++i)
+    for(int i = 0; i < threadNum; ++i)
     {
-        int ret = pthread_create(&pThreadPool->tid[i], NULL, handleEvent, (void *)pThreadPool);
+        int ret = pthread_create(&tid[i], NULL, handleEvent, this);
         if(ret != 0)
         {
             fprintf(stderr, "pthread_create: %s\n", strerror(ret));
-            pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
-            pThreadPool->exitFlag = 1;
-            pthread_cond_broadcast(&pThreadPool->taskQueue.cond);
-            pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
+            pthread_mutex_lock(&taskQueue.mutex);
+            exitFlag = 1;
+            pthread_cond_broadcast(&taskQueue.cond);
+            pthread_mutex_unlock(&taskQueue.mutex);
             for(int j = 0; j < i; ++j)
             {
-                pthread_join(pThreadPool->tid[j], NULL);
+                pthread_join(tid[j], NULL);
             }
-            free(pThreadPool->tid);
-            pthread_cond_destroy(&pThreadPool->taskQueue.cond);
-            pthread_mutex_destroy(&pThreadPool->taskQueue.mutex);
+            pthread_cond_destroy(&taskQueue.cond);
+            pthread_mutex_destroy(&taskQueue.mutex);
             return -1;
         }
     }
+    running = true;
     return 0;
 }
 int handle_long_cmd(int netFd, int user_id)
@@ -81,13 +82,18 @@ int handle_long_cmd(int netFd, int user_id)
     {
         return EXIT_FAILURE;
     }
+    int directoryId;
+    if(wire_recv_int(netFd, &directoryId) != sizeof(int) || directoryId < 0)
+    {
+        return EXIT_FAILURE;
+    }
     sysadd(user_id, cmd);
     
     // printf("cmd = %s\n", cmd);
     
     if (strncmp("puts ", cmd, 5) == 0)
     {
-        return Download(netFd, user_id);
+        return Download(netFd, user_id, directoryId);
     }
     else if(strncmp("gets ", cmd, 5) == 0)//gets
     {
@@ -103,7 +109,7 @@ int handle_long_cmd(int netFd, int user_id)
         }
         strcpy(file, cmd + i);
         // printf("file = %s\n", file);
-        return Upload(netFd, file, user_id);
+        return Upload(netFd, file, user_id, directoryId);
     }
     else
     {

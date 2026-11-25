@@ -20,7 +20,7 @@ int receive_token(int sockFd, char *token, int64_t *pDeadline)
     return 0;
 }
 
-void close_token(threadPool_t *pThreadPool)
+void close_token(ThreadPool *pThreadPool)
 {
     pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
     pThreadPool->tokenState = TOKEN_CLOSED;
@@ -28,7 +28,7 @@ void close_token(threadPool_t *pThreadPool)
     pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
 }
 
-int get_token(threadPool_t *pThreadPool, char *token,
+int get_token(ThreadPool *pThreadPool, char *token,
               unsigned long *pVersion, int forceRefresh)
 {
     int64_t now = network_time_ms();
@@ -93,7 +93,7 @@ int get_token(threadPool_t *pThreadPool, char *token,
 }
 
 // 只有主线程调用，控制连接的请求和回复保持串行
-int refresh_token(int sockFd, threadPool_t *pThreadPool)
+int refresh_token(int sockFd, ThreadPool *pThreadPool)
 {
     char buf[64];
     ssize_t ret;

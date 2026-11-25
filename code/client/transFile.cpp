@@ -1,3 +1,4 @@
+#include "file_descriptor.h"
 #include "threadPool.h"
 #include "worker.h"
 
@@ -255,150 +256,136 @@ int Download(int sockFd)
     {
         return EXIT_FAILURE;
     }
-    // printf("name = %s\n", name);
-    
-    int fd = open_in_root("download", name, O_RDWR | O_CREAT, 0666);// 文件不存在就创建
-    ERROR_CHECK(fd, -1, "open");
-    if(flock(fd, LOCK_EX | LOCK_NB) == -1)
-    {
-        close(fd);
-        return EXIT_FAILURE;
-    }
-    char buf[1000] = {0};
-
     // 获取文件大小
     int64_t fileSize;
     if(wire_recv_int(sockFd, &dataLength) != sizeof(int) ||
        dataLength != (int)sizeof(fileSize) ||
        wire_recv_i64(sockFd, &fileSize) != dataLength)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
     if(fileSize < 0)
     {
-        close(fd);
         return EXIT_FAILURE;
     }
 
-    // 断点重传:
-    // 检查本地是否有文件存在，不考虑有不同文件但文件名相同的情况，存在则文件大小不为0
-    struct stat statbuf;
-    int ret = fstat(fd, &statbuf);
-    if(ret == -1)
+    char expectedMd5[MD5_STR_LEN + 1] = {};
+    if(wire_recv_int(sockFd, &dataLength) != sizeof(int) || dataLength != MD5_STR_LEN ||
+       recvn(sockFd, expectedMd5, dataLength) != dataLength ||
+       strspn(expectedMd5, "0123456789abcdefABCDEF") != MD5_STR_LEN)
     {
-        perror("fstat");
-        close(fd);
-        return EXIT_FAILURE;
-    }
-    int64_t exitSize = statbuf.st_size;
-    if(exitSize < 0 || exitSize > fileSize)
-    {
-        close(fd);
-        return EXIT_FAILURE;
-    }
-    if(wire_send_i64(sockFd, exitSize, MSG_NOSIGNAL) != sizeof(exitSize))
-    {
-        close(fd);
-        return EXIT_FAILURE;
-    }
-    if(lseek(fd, exitSize, SEEK_SET) == -1)
-    {
-        close(fd);
         return EXIT_FAILURE;
     }
 
-    time_t timeBeg, timeEnd;
-
-    // 获取文件内容
-    // 判断文件大小，是否使用映射内存接收
-    timeBeg = time(NULL);
-    if(fileSize >= 1073741824)// 大于1G，直接接收到mmap映射内存
+    FileDescriptor downloads(open("download", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if(downloads.get() == -1)
     {
-        if((int64_t)(off_t)fileSize != fileSize || (uint64_t)fileSize > SIZE_MAX ||
-           ftruncate(fd, fileSize) == -1)
+        perror("open download");
+        return EXIT_FAILURE;
+    }
+    struct stat destination;
+    if(fstatat(downloads.get(), name, &destination, AT_SYMLINK_NOFOLLOW) == 0)
+    {
+        fprintf(stderr, "Download conflict: %s already exists. Rename it to download again.\n", name);
+        return EXIT_FAILURE;
+    }
+    if(errno != ENOENT)
+    {
+        perror("stat destination");
+        return EXIT_FAILURE;
+    }
+
+    const char *partialDir = ".netdisk-partial";
+    if(mkdirat(downloads.get(), partialDir, 0700) == -1 && errno != EEXIST)
+    {
+        perror("mkdir partial");
+        return EXIT_FAILURE;
+    }
+    FileDescriptor partial(openat(downloads.get(), partialDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if(partial.get() == -1)
+    {
+        perror("open partial directory");
+        return EXIT_FAILURE;
+    }
+    FileDescriptor localFile(openat(partial.get(), expectedMd5,
+                                    O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600));
+    int fd = localFile.get();
+    struct stat info, entry;
+    if(fd == -1 || flock(fd, LOCK_EX | LOCK_NB) == -1 || fstat(fd, &info) == -1 ||
+       !S_ISREG(info.st_mode) || fstatat(partial.get(), expectedMd5, &entry, AT_SYMLINK_NOFOLLOW) == -1 ||
+       entry.st_ino != info.st_ino || entry.st_dev != info.st_dev)
+    {
+        fprintf(stderr, "Cannot lock partial download for %s.\n", name);
+        return EXIT_FAILURE;
+    }
+    // 临时文件只追加已收到的字节，进程退出后长度仍是实际续传位置。
+    int64_t total = info.st_size;
+    if(total > fileSize)
+    {
+        if(ftruncate(fd, 0) == -1)
         {
-            close(fd);
             return EXIT_FAILURE;
         }
-        char *p = (char *)mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if(p == MAP_FAILED)
-        {
-            perror("mmap");
-            if(ftruncate(fd, exitSize) == -1)
-            {
-                perror("ftruncate");
-            }
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        // total只记录已经完整接收的连续块，失败时当前块由下次重传
-        int64_t total = exitSize;
-        while(total < fileSize)
-        {
-            int recvLength;
-            if(fileSize - total < LARGE_TRANSFER_SIZE)
-            {
-                recvLength = fileSize - total;
-            }
-            else
-            {
-                recvLength = LARGE_TRANSFER_SIZE;
-            }
-            if(recvn(sockFd, p + total, recvLength) != recvLength)
-            {
-                munmap(p, fileSize);
-                if(ftruncate(fd, total) == -1)
-                {
-                    perror("ftruncate");
-                }
-                close(fd);
-                return EXIT_FAILURE;
-            }
-            total += recvLength;
-        }
-        munmap(p, fileSize);
-        timeEnd = time(NULL);
+        total = 0;
     }
-    else // 小文件分次传
+    if(lseek(fd, total, SEEK_SET) == -1 ||
+       wire_send_i64(sockFd, total, MSG_NOSIGNAL) != sizeof(total))
     {
-        int64_t total = exitSize;
-        while (1)
+        return EXIT_FAILURE;
+    }
+
+    time_t timeBeg = time(NULL);
+    char buf[64 * 1024];
+    const bool rawStream = fileSize >= 1073741824;
+    while(true)
+    {
+        if(rawStream)
         {
-            bzero(buf, sizeof(buf));
-            ret = wire_recv_int(sockFd, &dataLength);
-            if (ret != sizeof(int))// 对面连接断开或长度没有接收完整
+            if(total == fileSize)
             {
-                close(fd);
-                return EXIT_FAILURE;
-            }
-            if (dataLength == 0)
-            {
-                if(total != fileSize)
-                {
-                    close(fd);
-                    return EXIT_FAILURE;
-                }
-                timeEnd = time(NULL);
                 break;
             }
-            if(dataLength < 0 || dataLength > (int)sizeof(buf) ||
-               dataLength > fileSize - total || recvn(sockFd, buf, dataLength) != dataLength)
-            {
-                close(fd);
-                return EXIT_FAILURE;
-            }
-            ret = writen(fd, buf, dataLength);
-            if(ret != dataLength)
-            {
-                close(fd);
-                return EXIT_FAILURE;
-            }
-            total += dataLength;
+            dataLength = fileSize - total < (int64_t)sizeof(buf) ? (int)(fileSize - total) : (int)sizeof(buf);
         }
+        else
+        {
+            if(wire_recv_int(sockFd, &dataLength) != sizeof(int))
+            {
+                return EXIT_FAILURE;
+            }
+            if(dataLength == 0 && total == fileSize)
+            {
+                break;
+            }
+        }
+        if(dataLength <= 0 || dataLength > (int)sizeof(buf) || dataLength > fileSize - total ||
+           recvn(sockFd, buf, dataLength) != dataLength || writen(fd, buf, dataLength) != dataLength)
+        {
+            return EXIT_FAILURE;
+        }
+        total += dataLength;
     }
-    close(fd);
-    int total_time = timeEnd - timeBeg;
-    printf("\033[1;37;46m本次下载耗时%ds^_^\033[0m\n",total_time);
+
+    char actualMd5[MD5_STR_LEN + 1];
+    if(Compute_fd_md5(fd, actualMd5, sockFd) != 0)
+    {
+        return EXIT_FAILURE;
+    }
+    if(strcasecmp(actualMd5, expectedMd5) != 0)
+    {
+        fprintf(stderr, "Download checksum mismatch for %s. Retry to download again.\n", name);
+        if(ftruncate(fd, 0) == -1)
+        {
+            perror("reset partial download");
+        }
+        return EXIT_FAILURE;
+    }
+    if(renameat2(partial.get(), expectedMd5, downloads.get(), name, RENAME_NOREPLACE) == -1)
+    {
+        perror("publish download");
+        return EXIT_FAILURE;
+    }
+    int total_time = time(NULL) - timeBeg;
+    printf("本次下载耗时%ds\n", total_time);
     return wire_send_int(sockFd, total_time, MSG_NOSIGNAL) == sizeof(int) ? 0 : EXIT_FAILURE;
 }

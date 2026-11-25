@@ -1,3 +1,4 @@
+#include <memory>
 #include "threadPool.h"
 #include "worker.h"
 
@@ -45,7 +46,7 @@ int mysqlconnect(MYSQL **pconn)
 }
 
 //执行sql语句
-int do_query(char *query, MYSQL **pconn)
+int do_query(const char *query, MYSQL **pconn)
 {
     if(*pconn == NULL)
     {
@@ -62,7 +63,8 @@ int do_query(char *query, MYSQL **pconn)
 
 // 外部字符串通过参数绑定进入SQL，结果截断或NULL均按失败处理
 static int execute_sql(const char *query, const char **values, int count,
-                       char **columns, const size_t *capacities, int columnCount)
+                       char **columns, const size_t *capacities, int columnCount,
+                       bool requireOneChange = false)
 {
     MYSQL *conn = NULL;
     MYSQL_STMT *stmt = NULL;
@@ -72,6 +74,7 @@ static int execute_sql(const char *query, const char **values, int count,
     my_bool nulls[3] = {0};
     my_bool errors[3] = {0};
     int status = -1;
+    int ret;
     if(count < 0 || count > 5 || columnCount < 0 || columnCount > 3 ||
        mysqlconnect(&conn) != 0)
     {
@@ -105,7 +108,7 @@ static int execute_sql(const char *query, const char **values, int count,
     }
     if(columnCount == 0)
     {
-        status = 0;
+        status = requireOneChange && mysql_stmt_affected_rows(stmt) != 1 ? 1 : 0;
         goto done;
     }
     if(mysql_stmt_field_count(stmt) != (unsigned int)columnCount)
@@ -130,7 +133,7 @@ static int execute_sql(const char *query, const char **values, int count,
     {
         goto done;
     }
-    int ret = mysql_stmt_fetch(stmt);
+    ret = mysql_stmt_fetch(stmt);
     if(ret == MYSQL_NO_DATA)
     {
         status = 1;
@@ -177,110 +180,93 @@ int add_user(char *user_name, char *salt, char *crptpasswd)
 int get_user_salt(char *user_name, char *salt, char *crptpasswd)
 {
     MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
     int ret = mysqlconnect(&conn);
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> connection(conn, mysql_close);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
     ret = mysql_query(conn, "set names 'utf8'");
     if(ret != 0)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     ret = do_query("select username, salt, cryptpasswd from client_info", &conn);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
-    result = mysql_use_result(conn);
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(mysql_use_result(conn), mysql_free_result);
     if(result == NULL)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     MYSQL_ROW row;
     // printf("user_name = %s\n", user_name);
-    while((row = mysql_fetch_row(result)) != NULL)
+    while((row = mysql_fetch_row(result.get())) != NULL)
     {
         if(row[0] == NULL || row[1] == NULL || row[2] == NULL)
         {
-            goto error;
+            return -1;
         }
         // printf("row[0] = %s\n", row[0]);
         if(strcmp(row[0], user_name) == 0)
         {
             if(strlen(row[1]) >= SATL_LEN + 1)
             {
-                goto error;
+                return -1;
             }
             strcpy(salt, row[1]);
             if(strlen(row[2]) >= 50)
             {
-                goto error;
+                return -1;
             }
             strcpy(crptpasswd, row[2]);
-            mysql_free_result(result);
-            result = NULL;
-            mysql_close(conn);
             return 0;
         }
     }
     if(mysql_errno(conn) != 0)
     {
-        goto error;
+        return -1;
     }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
     return 1;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
 }
 
 // 根据用户名获取用户id
 int find_user_id(char *user_name, int *puser_id)
 {
     MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
     int ret = mysqlconnect(&conn);
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> connection(conn, mysql_close);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
     ret = mysql_query(conn, "set names 'utf8'");
     if(ret != 0)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     ret = do_query("select username, id from client_info", &conn);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
-    result = mysql_use_result(conn);
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(mysql_use_result(conn), mysql_free_result);
     if(result == NULL)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     MYSQL_ROW row;
-    while((row = mysql_fetch_row(result)) != NULL)
+    while((row = mysql_fetch_row(result.get())) != NULL)
     {
         if(row[0] == NULL || row[1] == NULL)
         {
-            goto error;
+            return -1;
         }
         if(strcmp(row[0], user_name) == 0)
         {
@@ -289,250 +275,70 @@ int find_user_id(char *user_name, int *puser_id)
             long value = strtol(row[1], &end, 10);
             if(errno != 0 || end == row[1] || *end != '\0' || value < 0 || value > INT_MAX)
             {
-                goto error;
+                return -1;
             }
             *puser_id = value;
 
-            mysql_free_result(result);
-            result = NULL;
-            mysql_close(conn);
             return 0;
         }
     }
     if(mysql_errno(conn) != 0)
     {
-        goto error;
+        return -1;
     }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
     return 1;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
 }
 
 // 根据用户id获取用户名
 int get_user_name(char *user_name, const int user_id)
 {
     MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
     int ret = mysqlconnect(&conn);
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> connection(conn, mysql_close);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
     ret = mysql_query(conn, "set names 'utf8'");
     if(ret != 0)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     ret = do_query("select username, id from client_info", &conn);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
-    result = mysql_use_result(conn);
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(mysql_use_result(conn), mysql_free_result);
     if(result == NULL)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     MYSQL_ROW row;
-    while((row = mysql_fetch_row(result)) != NULL)
+    while((row = mysql_fetch_row(result.get())) != NULL)
     {
         if(row[1] == NULL || row[0] == NULL)
         {
-            goto error;
+            return -1;
         }
         if(user_id == atoi(row[1]))     //如果userid符合，直接拷贝并返回
         {
             if(strlen(row[0]) >= PROTOCOL_USER_NAME_CAPACITY)
             {
-                goto error;
+                return -1;
             }
             strcpy(user_name, row[0]);
 
-            mysql_free_result(result);
-            result = NULL;
-            mysql_close(conn);
             return 0;
         }
     }
     if(mysql_errno(conn) != 0)
     {
-        goto error;
+        return -1;
     }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
     return 1;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
-}
-
-// 通过user_id获取当前目录的文件夹编号
-int get_user_code(int user_id, int *pcode)
-{
-    MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
-    int ret = mysqlconnect(&conn);
-    if(ret != 0)
-    {
-        goto error;
-    }
-    ret = do_query("select code, id from client_info", &conn);
-    if(ret != 0)
-    {
-        goto error;
-    }
-    result = mysql_use_result(conn);
-    if(result == NULL)
-    {
-        fprintf(stderr, "Database query failed.\n");
-        goto error;
-    }
-    MYSQL_ROW row;
-    while((row = mysql_fetch_row(result)) != NULL)
-    {
-        if(row[1] == NULL || row[0] == NULL)
-        {
-            goto error;
-        }
-        if(user_id == atoi(row[1]))
-        {
-            char *end;
-            errno = 0;
-            long value = strtol(row[0], &end, 10);
-            if(errno != 0 || end == row[0] || *end != '\0' || value < 0 || value > INT_MAX)
-            {
-                goto error;
-            }
-            *pcode = value;
-
-            mysql_free_result(result);
-            result = NULL;
-            mysql_close(conn);
-            return 0;
-        }
-    }
-    if(mysql_errno(conn) != 0)
-    {
-        goto error;
-    }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
-    return 1;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
-}
-
-// 通过user_id获取当前目录的字符串
-int get_user_pwd(int user_id, char *pwd)
-{
-    MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
-    int ret = mysqlconnect(&conn);
-    if(ret != 0)
-    {
-        goto error;
-    }
-    ret = mysql_query(conn, "set names 'utf8'");
-    if(ret != 0)
-    {
-        fprintf(stderr, "Database query failed.\n");
-        goto error;
-    }
-    ret = do_query("select pwd, id from client_info", &conn);
-    if(ret != 0)
-    {
-        goto error;
-    }
-    result = mysql_use_result(conn);
-    if(result == NULL)
-    {
-        fprintf(stderr, "Database query failed.\n");
-        goto error;
-    }
-    MYSQL_ROW row;
-    while((row = mysql_fetch_row(result)) != NULL)
-    {
-        if(row[1] == NULL || row[0] == NULL)
-        {
-            goto error;
-        }
-        if(user_id == atoi(row[1]))
-        {
-            if(strlen(row[0]) >= 1000)
-            {
-                goto error;
-            }
-            strcpy(pwd, row[0]);
-
-            mysql_free_result(result);
-            result = NULL;
-            mysql_close(conn);
-            return 0;
-        }
-    }
-    if(mysql_errno(conn) != 0)
-    {
-        goto error;
-    }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
-    return 1;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
-}
-
-// 通过user_id更新用户当前目录
-int update_user_pwd(int user_id, char *pwd, int code)
-{
-    char id[32], codeText[32];
-    snprintf(id, sizeof(id), "%d", user_id);
-    snprintf(codeText, sizeof(codeText), "%d", code);
-    const char *values[] = {pwd, codeText, id};
-    return execute_sql("update client_info set pwd = ?, code = ? where id = ?",
-                       values, 3, NULL, NULL, 0);
 }
 
 // 初始化本地文件表
@@ -668,6 +474,7 @@ int add_link(char *md5_str)
     my_bool isNull = 0;
     int localId = 0;
     int maxLink = INT_MAX;
+    int ret;
     int inTransaction = 0;
     const char *query = "select id from local_files where md5 = ? for update";
     if(md5_str == NULL || mysqlconnect(&conn) != 0 ||
@@ -698,7 +505,7 @@ int add_link(char *md5_str)
     {
         goto error;
     }
-    int ret = mysql_stmt_close(stmt);
+    ret = mysql_stmt_close(stmt);
     stmt = NULL;
     if(ret != 0)
     {
@@ -899,6 +706,10 @@ int prepare_upload(int parent_id, char *name, int owner_id, char *md5_str,
     size_t virtualCapacities[] = {sizeof(oldMd5), sizeof(oldSize), sizeof(oldType)};
     char *localColumns[] = {real_name, localStatus};
     size_t localCapacities[] = {1024, sizeof(localStatus)};
+    const char *userValues[] = {owner};
+    const char *virtualValues[] = {owner, parent, name};
+    const char *md5Values[] = {md5_str};
+    const char *sizeValues[] = {md5_str, size};
     *pfd = -1;
     *complete = 0;
     if(parent_id < 0 || owner_id < 0 || fileSize < 0 ||
@@ -917,7 +728,6 @@ int prepare_upload(int parent_id, char *name, int owner_id, char *md5_str,
         goto done;
     }
     transaction = 1;
-    const char *userValues[] = {owner};
     if(upload_statement(conn, "select id from client_info where id = ? for update",
                         userValues, 1, NULL, NULL, 0, &rows) != 0 || rows != 1)
     {
@@ -932,7 +742,6 @@ int prepare_upload(int parent_id, char *name, int owner_id, char *md5_str,
             goto done;
         }
     }
-    const char *virtualValues[] = {owner, parent, name};
     if(upload_statement(conn, "select md5, filesize, type from virtual_file where owner_id = ? and parent_id = ? and filename = ? for update",
                         virtualValues, 3, virtualColumns, virtualCapacities, 3, &rows) != 0 || rows > 1)
     {
@@ -955,8 +764,6 @@ int prepare_upload(int parent_id, char *name, int owner_id, char *md5_str,
         }
         oldFile = 1;
     }
-    const char *md5Values[] = {md5_str};
-    const char *sizeValues[] = {md5_str, size};
     // 同一物理内容的已登记大小不同，不能用本次大小改写共享文件状态
     if(upload_statement(conn, "select id from virtual_file where md5 = ? and type = 'f' and (filesize is null or filesize <> CAST(? AS SIGNED)) for update",
                         sizeValues, 2, NULL, NULL, 0, &rows) != 0)
@@ -1027,8 +834,10 @@ int prepare_upload(int parent_id, char *name, int owner_id, char *md5_str,
             goto done;
         }
         snprintf(localLinks, sizeof(localLinks), "%llu", (unsigned long long)rows + (oldFile ? 0 : 1));
-        int length = snprintf(real_name, 1024, "%s%d%d", name, owner_id, parent_id);
-        if(length < 0 || length > 255 || !is_valid_file_name(real_name, length))
+        // 只为新内容分配物理名称，已登记的 MD5 始终使用原映射。
+        if(upload_statement(conn, "select concat('blob-', UUID())", NULL, 0,
+                            localColumns, localCapacities, 1, &rows) != 0 || rows != 1 ||
+           !is_valid_file_name(real_name, strlen(real_name)))
         {
             goto done;
         }
@@ -1125,6 +934,15 @@ int add_virtual_dir(int parent_id, char *filename, int owner_id)
     char parent[32], owner[32];
     snprintf(parent, sizeof(parent), "%d", parent_id);
     snprintf(owner, sizeof(owner), "%d", owner_id);
+    // 另一个会话可能已经删除当前目录；只有父目录仍存在时才能创建子项。
+    if(parent_id != 0)
+    {
+        const char *values[] = {filename, parent, owner};
+        return execute_sql("insert into virtual_file(parent_id, filename, owner_id, md5, filesize, type) "
+                           "select id, ?, owner_id, '0', 0, 'd' from virtual_file "
+                           "where id = ? and owner_id = ? and type = 'd'",
+                           values, 3, NULL, NULL, 0, true);
+    }
     const char *values[] = {parent, filename, owner};
     return execute_sql("insert into virtual_file(parent_id, filename, owner_id, md5, filesize, type) values(?, ?, ?, '0', 0, 'd')",
                        values, 3, NULL, NULL, 0);
@@ -1146,17 +964,17 @@ int add_virtual_file(int parent_id, char *filename, int owner_id, char *md5_str,
 int find_code_files(connection_t *pConnection, int code, int user_id)
 {
     MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
     int ret = mysqlconnect(&conn);
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> connection(conn, mysql_close);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
     ret = mysql_query(conn, "set names 'utf8'");
     if(ret != 0)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     char query[1024] = {0};
     //可以通过parent_id找到目录下的所有文件
@@ -1167,65 +985,51 @@ int find_code_files(connection_t *pConnection, int code, int user_id)
                    code, user_id);
     if(ret < 0 || ret >= (int)sizeof(query))
     {
-        goto error;
+        return -1;
     }
     ret = do_query(query, &conn);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
-    result = mysql_use_result(conn);
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(mysql_use_result(conn), mysql_free_result);
     if(result == NULL)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     MYSQL_ROW row;
     train_t train;
-    while((row = mysql_fetch_row(result)) != NULL)
+    while((row = mysql_fetch_row(result.get())) != NULL)
     {
         if(row[0] == NULL)
         {
-            goto error;
+            return -1;
         }
         train.length = strlen(row[0]);
         bzero(train.buf, sizeof(train.buf));
         if(strlen(row[0]) >= sizeof(train.buf))
         {
-            goto error;
+            return -1;
         }
         strcpy(train.buf, row[0]);
         //每找到一个文件，就发给客户端
         if(wire_queue_train(pConnection, &train) != (int)sizeof(train.length) + train.length)
         {
-            goto error;
+            return -1;
         }
     }
     if(mysql_errno(conn) != 0)
     {
-        goto error;
+        return -1;
     }
     // 发送长度0表示结束
     train.length = 0;
     if(wire_queue_train(pConnection, &train) != (int)sizeof(train.length) + train.length)
     {
-        goto error;
+        return -1;
     }
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
     return 0;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
 }
 
 // 获取文件md5值，也可以检查文件是否存在，存在返回0，不存在返回1
@@ -1313,7 +1117,7 @@ static int collect_delete_nodes(MYSQL *conn, MYSQL_RES *result,
             {
                 return -1;
             }
-            delete_node_t *newNodes = realloc(*nodes, newCapacity * sizeof(**nodes));
+            auto *newNodes = static_cast<delete_node_t *>(realloc(*nodes, newCapacity * sizeof(**nodes)));
             if(newNodes == NULL)
             {
                 return -1;
@@ -1341,6 +1145,7 @@ int del_virtual_file(int code, int user_id)
     delete_node_t *nodes = NULL;
     size_t count = 0, capacity = 0;
     int inTransaction = 0;
+    int ret;
     char query[1024];
     if(code <= 0 || user_id < 0 || mysqlconnect(&conn) != 0 ||
        mysql_query(conn, "set names 'utf8'") != 0 || mysql_autocommit(conn, 0) != 0)
@@ -1349,7 +1154,7 @@ int del_virtual_file(int code, int user_id)
     }
     inTransaction = 1;
 
-    int ret = snprintf(query, sizeof(query),
+    ret = snprintf(query, sizeof(query),
                        "select id, type, md5 from virtual_file where id = %d and owner_id = %d for update",
                        code, user_id);
     if(ret < 0 || ret >= (int)sizeof(query) || mysql_query(conn, query) != 0 ||
@@ -1463,81 +1268,62 @@ error:
 int get_parent_id(int id, int *pparent_code)
 {
     MYSQL *conn = NULL;
-    MYSQL_RES *result = NULL;
     int ret = mysqlconnect(&conn);
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> connection(conn, mysql_close);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
     ret = mysql_query(conn, "set names 'utf8'");
     if(ret != 0)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
     char query[1024] = {0};
     ret = snprintf(query, sizeof(query), "select parent_id from virtual_file where id = %d", id);
     if(ret < 0 || ret >= (int)sizeof(query))
     {
-        goto error;
+        return -1;
     }
 
     ret = do_query(query, &conn);
     if(ret != 0)
     {
-        goto error;
+        return -1;
     }
-    result = mysql_store_result(conn);
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(mysql_store_result(conn), mysql_free_result);
     if(result == NULL)
     {
         fprintf(stderr, "Database query failed.\n");
-        goto error;
+        return -1;
     }
-    int rows = mysql_num_rows(result);
+    int rows = mysql_num_rows(result.get());
     
     if(rows == 0)// 文件不存在返回1
     {
-        mysql_free_result(result);
-        result = NULL;
-        mysql_close(conn);
         return 1;
     }
     MYSQL_ROW row;
-    if((row = mysql_fetch_row(result)) == NULL)
+    if((row = mysql_fetch_row(result.get())) == NULL)
     {
         if(mysql_errno(conn) != 0)
         {
-            goto error;
+            return -1;
         }
-        mysql_free_result(result);
-        mysql_close(conn);
         return 1;
     }
     if(row[0] == NULL)
     {
-        goto error;
+        return -1;
     }
     char *end;
     errno = 0;
     long value = strtol(row[0], &end, 10);
     if(errno != 0 || end == row[0] || *end != '\0' || value < 0 || value > INT_MAX)
     {
-        goto error;
+        return -1;
     }
     *pparent_code = value;
-    mysql_free_result(result);
-    result = NULL;
-    mysql_close(conn);
     return 0;
-
-error:
-    if(result != NULL)
-    {
-        mysql_free_result(result);
-    }
-    if(conn != NULL)
-    {
-        mysql_close(conn);
-    }
-    return -1;
 }
