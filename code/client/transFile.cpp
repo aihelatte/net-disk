@@ -318,6 +318,19 @@ int Download(int sockFd)
         fprintf(stderr, "Cannot lock partial download for %s.\n", name);
         return EXIT_FAILURE;
     }
+    // 上次可能在发布后、删除临时名之前退出。已发布的文件不能再作为可写断点。
+    if(info.st_nlink > 1)
+    {
+        if(unlinkat(partial.get(), expectedMd5, 0) == -1)
+        {
+            perror("remove stale partial link");
+        }
+        else
+        {
+            fprintf(stderr, "Recovered a published download. Retry gets %s.\n", name);
+        }
+        return EXIT_FAILURE;
+    }
     // 临时文件只追加已收到的字节，进程退出后长度仍是实际续传位置。
     int64_t total = info.st_size;
     if(total > fileSize)
@@ -380,10 +393,22 @@ int Download(int sockFd)
         }
         return EXIT_FAILURE;
     }
-    if(renameat2(partial.get(), expectedMd5, downloads.get(), name, RENAME_NOREPLACE) == -1)
+    // linkat 原子创建正式文件名，其他任务先占用该名称时会返回 EEXIST。
+    if(linkat(partial.get(), expectedMd5, downloads.get(), name, 0) == -1)
     {
-        perror("publish download");
+        if(errno == EEXIST)
+        {
+            fprintf(stderr, "Download conflict: %s already exists. Rename it to download again.\n", name);
+        }
+        else
+        {
+            perror("publish download");
+        }
         return EXIT_FAILURE;
+    }
+    if(unlinkat(partial.get(), expectedMd5, 0) == -1)
+    {
+        perror("download published, cannot remove partial link");
     }
     int total_time = time(NULL) - timeBeg;
     printf("本次下载耗时%ds\n", total_time);
