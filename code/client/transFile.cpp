@@ -135,12 +135,9 @@ int Upload(int netFd, char *file, int fd, const char *md5_str)
         return EXIT_FAILURE;
     }
 
-    // printf("time to puts!\n");
 
     // 发送文件内容
     // 判断文件大小，大文件使用sendfile分块传输
-    // printf("exitSize = %lld\n", (long long)exitSize);
-    // printf("fileSize = %lld\n", (long long)fileSize);
     if(fileSize >= 1073741824)// 大于1G，使用sendfile发送
     {
         off_t offset = exitSize;

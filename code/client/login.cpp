@@ -15,7 +15,6 @@ int register_user(int sockFd)
     {
         return -1;
     }
-    // printf("user_name = %s\n", user_name);
     printf("\033[1;34mPlease enter passwd:\033[0m");
     fflush(stdout);
     if(read_input_line(passwd, sizeof(passwd)) <= 0)
@@ -25,7 +24,6 @@ int register_user(int sockFd)
     // 设置小火车，传输状态信息
     train_state.state = REGISTER;
     strcpy(train_state.buf, user_name);
-    //printf("train.buf = %s\n", train_state.buf);
     train_state.length = strlen(train_state.buf);
     train_state.pre_length = 0;
     if(wire_send_command(sockFd, &train_state, 0) != (int)(sizeof(train_state.length) + sizeof(train_state.state) + sizeof(train_state.pre_length) + train_state.length))
@@ -132,7 +130,6 @@ int login(int sockFd, char *uName)
             return -1;
         }
         strncpy(crptpasswd, encrypted, sizeof(crptpasswd) - 1);// 保留现有49字节协议，完整散列另行迁移
-        //printf("crptpasswd = %s\n", crptpasswd);
         train_t train;
         bzero(&train, sizeof(train));
         train.length = strlen(crptpasswd);
@@ -151,7 +148,6 @@ int login(int sockFd, char *uName)
         {
             return -1;
         }
-        //printf("check = %d\n", check);
         if(check == 0)// 密码验证成功
         {
             strcpy(uName, user_name);

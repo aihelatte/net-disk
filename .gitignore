@@ -43,7 +43,8 @@ vgcore.*
 网盘图片/
 
 # Local project notes (already tracked docs remain tracked)
-/docs/
+/docs/*
+!/docs/coding-style.md
 
 # OS metadata
 .DS_Store

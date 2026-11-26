@@ -5,7 +5,7 @@ OBJS:=$(patsubst %.cpp,%.cpp.o,$(SRCS))
 #预定义变量
 CXX:=g++
 CPPFLAGS:=-I../include
-CXXFLAGS:=-std=c++17 -MMD -MP -g -Wall -Wextra -Wpedantic -Werror=return-type
+CXXFLAGS:=-std=c++17 -pthread -MMD -MP -g -Wall -Wextra -Wpedantic -Werror=return-type
 LDFLAGS:=-L../l8w8jwt/bin/release
 $(out):$(OBJS)
 	$(CXX) $^ -o $@ $(LDFLAGS) -pthread -lcrypt -ll8w8jwt -lmbedcrypto -lmbedx509 -g

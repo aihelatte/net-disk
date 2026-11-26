@@ -1,101 +1,112 @@
-#include "file_descriptor.h"
-#include"threadPool.h"
-#include "worker.h"
-// 优雅的退出，完成任务再退出
-void cleanFunc(void *arg)
-{
-    ThreadPool * pThreadPool = (ThreadPool*)arg;
-    pthread_mutex_unlock(&pThreadPool->taskQueue.mutex);
-}
+#include "threadPool.h"
+#include <exception>
+#include <functional>
+#include <utility>
 
-//线程池子线程入口函数
-void *handleEvent(void *arg)
+// 启动指定数量的工作线程。创建失败时回收已启动的线程并返回 -1。
+int ThreadPool::start(int workerNum)
 {
-    ThreadPool * pThreadPool = (ThreadPool*)arg;
-    int netFd;
-    int user_id;
-    while(1)
+    if (running || workerNum <= 0)
     {
-        printf("I am free!tid = %lu\n", pthread_self());
-        pthread_mutex_lock(&pThreadPool->taskQueue.mutex);
-        pthread_cleanup_push(cleanFunc, (void*)pThreadPool);// 加锁后就push
-        while(pThreadPool->taskQueue.empty() && pThreadPool->exitFlag == 0)// wait条件需要更改，否则唤醒后又会wait
-        {
-            pthread_cond_wait(&pThreadPool->taskQueue.cond, &pThreadPool->taskQueue.mutex);
-        }
-        if(pThreadPool->exitFlag != 0)
-        {
-            // printf("I am going to die!\n");
-            pthread_exit(NULL);
-        }
-        netFd = pThreadPool->taskQueue.front().netFd;
-        user_id = pThreadPool->taskQueue.front().code;
-        pThreadPool->taskQueue.pop();// 任务内容获取完成
-        pthread_cleanup_pop(1);// 原来解锁的位置改为pop
-
-        printf("I am working! tid = %lu\n", pthread_self());
-
-        FileDescriptor connection(netFd);
-        handle_long_cmd(connection.get(), user_id);// 开始处理命令，直接用netFd，监听客户端发来的命令，这个netFd是客户端子线程发来的
-
-        printf("done!\n");
+        return -1;
     }
-}
-//create线程
-int ThreadPool::createWorkers()
-{
-    for(int i = 0; i < threadNum; ++i)
-    {
-        int ret = pthread_create(&tid[i], NULL, handleEvent, this);
-        if(ret != 0)
-        {
-            fprintf(stderr, "pthread_create: %s\n", strerror(ret));
-            pthread_mutex_lock(&taskQueue.mutex);
-            exitFlag = 1;
-            pthread_cond_broadcast(&taskQueue.cond);
-            pthread_mutex_unlock(&taskQueue.mutex);
-            for(int j = 0; j < i; ++j)
-            {
-                pthread_join(tid[j], NULL);
-            }
-            pthread_cond_destroy(&taskQueue.cond);
-            pthread_mutex_destroy(&taskQueue.mutex);
-            return -1;
-        }
-    }
+    exitFlag = false;
     running = true;
+    try
+    {
+        workers.reserve(workerNum);
+        for (int i = 0; i < workerNum; ++i)
+        {
+            workers.emplace_back(&ThreadPool::work, this);
+        }
+    } catch(const std::exception &error) {
+        fprintf(stderr, "Starting worker threads: %s\n", error.what());
+        stop();
+        return -1;
+    }
     return 0;
 }
+
+// 停止领取新任务并清空队列。已领取的任务执行结束后再回收线程。
+void ThreadPool::stop()
+{
+    if (!running)
+    {
+        return;
+    }
+    running = false;
+    {
+        std::lock_guard<std::mutex> lock(taskQueue.mutex);
+        exitFlag = true;
+        while (!taskQueue.empty())
+        {
+            taskQueue.pop();
+        }
+    }
+    // 队列锁已释放，唤醒后工作线程可以取锁并看到退出状态。
+    taskQueue.cond.notify_all();
+    for (std::thread &worker : workers)
+    {
+        worker.join();
+    }
+    workers.clear();
+}
+
+// 循环取任务。队列状态在锁内处理，实际传输在锁外执行。
+void ThreadPool::work()
+{
+    const size_t threadId = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    for (;;)
+    {
+        task_t task{};
+        printf("I am free!tid = %zu\n", threadId);
+        {
+            std::unique_lock<std::mutex> lock(taskQueue.mutex);
+            // 等待时会释放互斥锁。被唤醒后持锁重查条件，防止空队列上误取任务。
+            taskQueue.cond.wait(lock, [this] { return exitFlag || !taskQueue.empty(); });
+            if (exitFlag)
+            {
+                return;
+            }
+            // 队列把数据连接交给当前任务，弹出旧条目时不会关闭这个 fd。
+            task = std::move(taskQueue.front());
+            taskQueue.pop();
+        }
+        printf("I am working! tid = %zu\n", threadId);
+        handle_long_cmd(task.netFd.get(), task.code);
+        puts("done!");
+    }
+}
+
 int handle_long_cmd(int netFd, int user_id)
 {
     puts("I am long cmd!");
     // 接收命令
     char cmd[100] = {0};
     int datalength;
-    if(wire_recv_int(netFd, &datalength) != sizeof(datalength) ||
+    if (wire_recv_int(netFd, &datalength) != sizeof(datalength) ||
        datalength < 6 || datalength >= (int)sizeof(cmd) ||
        recvn(netFd, cmd, datalength) != datalength)
     {
         return EXIT_FAILURE;
     }
-    if(memchr(cmd, '\0', datalength) != NULL)
+    if (memchr(cmd, '\0', datalength) != NULL)
     {
         return EXIT_FAILURE;
     }
     int directoryId;
-    if(wire_recv_int(netFd, &directoryId) != sizeof(int) || directoryId < 0)
+    if (wire_recv_int(netFd, &directoryId) != sizeof(int) || directoryId < 0)
     {
         return EXIT_FAILURE;
     }
     sysadd(user_id, cmd);
-    
-    // printf("cmd = %s\n", cmd);
-    
+
+
     if (strncmp("puts ", cmd, 5) == 0)
     {
         return Download(netFd, user_id, directoryId);
     }
-    else if(strncmp("gets ", cmd, 5) == 0)//gets
+    else if (strncmp("gets ", cmd, 5) == 0)//gets
     {
         char file[100] = {0};
         int i = 4;
@@ -103,12 +114,11 @@ int handle_long_cmd(int netFd, int user_id)
         {
             ++i;
         }
-        if(datalength - i <= 0 || datalength - i >= (int)sizeof(file))
+        if (datalength - i <= 0 || datalength - i >= (int)sizeof(file))
         {
             return EXIT_FAILURE;
         }
         strcpy(file, cmd + i);
-        // printf("file = %s\n", file);
         return Upload(netFd, file, user_id, directoryId);
     }
     else

@@ -1,3 +1,4 @@
+#include "file_descriptor.h"
 #include "threadPool.h"
 #include "worker.h"
 #include "md5.h"
@@ -9,45 +10,45 @@ int Compute_fd_md5(int fd, char *md5_str, int sockFd)
     MD5_CTX md5;
     off_t offset = 0;
     int64_t lastProgress = 0;
-    if(sockFd >= 0)
+    if (sockFd >= 0)
     {
         lastProgress = network_time_ms();
-        if(lastProgress < 0)
+        if (lastProgress < 0)
         {
             return -1;
         }
     }
 
     MD5Init(&md5);
-    while(1)
+    while (1)
     {
         ssize_t ret = pread(fd, data, sizeof(data), offset);
-        if(ret == -1)
+        if (ret == -1)
         {
-            if(errno == EINTR)
+            if (errno == EINTR)
             {
                 continue;
             }
             perror("pread");
             return -1;
         }
-        if(ret == 0)
+        if (ret == 0)
         {
             break;
         }
         MD5Update(&md5, data, ret);
         offset += ret;
-        if(sockFd >= 0)
+        if (sockFd >= 0)
         {
             int64_t now = network_time_ms();
-            if(now < 0)
+            if (now < 0)
             {
                 return -1;
             }
-            if(now - lastProgress >= 10000)
+            if (now - lastProgress >= 10000)
             {
                 int progress = TRANSFER_VERIFY_PROGRESS;
-                if(wire_send_int(sockFd, progress, MSG_NOSIGNAL) != sizeof(progress))
+                if (wire_send_int(sockFd, progress, MSG_NOSIGNAL) != sizeof(progress))
                 {
                     return -1;
                 }
@@ -57,7 +58,7 @@ int Compute_fd_md5(int fd, char *md5_str, int sockFd)
     }
 
     MD5Final(&md5, md5_value);
-    for(int i = 0; i < MD5_SIZE; ++i)
+    for (int i = 0; i < MD5_SIZE; ++i)
     {
         snprintf(md5_str + i * 2, 3, "%02x", md5_value[i]);
     }
@@ -67,13 +68,11 @@ int Compute_fd_md5(int fd, char *md5_str, int sockFd)
 
 int Compute_file_md5(char *file_path, char *md5_str)
 {
-	int fd = open_in_root("upload", file_path, O_RDONLY, 0);
-	if(fd == -1)
+	FileDescriptor file(open_in_root("upload", file_path, O_RDONLY, 0));
+	if (file.get() == -1)
 	{
 		perror("open");
 		return -1;
 	}
-	int ret = Compute_fd_md5(fd, md5_str);
-	close(fd);
-	return ret;
+	return Compute_fd_md5(file.get(), md5_str);
 }

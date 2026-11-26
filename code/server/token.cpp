@@ -3,6 +3,26 @@
 #include "worker.h"
 #include <myhead.h>
 
+namespace {
+// 持有 JWT 库返回的字段数组。解码或校验提前失败时也由析构释放。
+class JwtClaimsGuard
+{
+public:
+    JwtClaimsGuard(l8w8jwt_claim *claims, size_t count) : claims_(claims), count_(count) {}
+    JwtClaimsGuard(const JwtClaimsGuard &) = delete;
+    JwtClaimsGuard &operator=(const JwtClaimsGuard &) = delete;
+
+    ~JwtClaimsGuard()
+    {
+        l8w8jwt_free_claims(claims_, count_);
+    }
+
+private:
+    l8w8jwt_claim *claims_;
+    size_t count_;
+};
+}
+
 static unsigned char tokenKey[64];
 static int tokenKeyReady;
 // JWT 库的 C 接口使用 char*。
@@ -12,14 +32,14 @@ static char audience[] = "net-disk-transfer";
 static int read_token_bytes(int fd, unsigned char *buf, size_t length)
 {
     size_t total = 0;
-    while(total < length)
+    while (total < length)
     {
         ssize_t ret = read(fd, buf + total, length - total);
-        if(ret == -1 && errno == EINTR)
+        if (ret == -1 && errno == EINTR)
         {
             continue;
         }
-        if(ret <= 0)
+        if (ret <= 0)
         {
             return -1;
         }
@@ -30,21 +50,21 @@ static int read_token_bytes(int fd, unsigned char *buf, size_t length)
 
 int init_token_key()
 {
-    int fd = open("./config/token.key", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if(fd == -1)
+    FileDescriptor fd(open("./config/token.key", O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    if (fd.get() == -1)
     {
         return -1;
     }
     struct stat statbuf;
     int ret = -1;
-    if(fstat(fd, &statbuf) == 0 && S_ISREG(statbuf.st_mode) &&
+    if (fstat(fd.get(), &statbuf) == 0 && S_ISREG(statbuf.st_mode) &&
        statbuf.st_uid == geteuid() && (statbuf.st_mode & 077) == 0 &&
        statbuf.st_size == (off_t)sizeof(tokenKey))
     {
-        ret = read_token_bytes(fd, tokenKey, sizeof(tokenKey));
+        ret = read_token_bytes(fd.get(), tokenKey, sizeof(tokenKey));
     }
-    close(fd);
-    if(ret != 0)
+
+    if (ret != 0)
     {
         memset(tokenKey, 0, sizeof(tokenKey));
         tokenKeyReady = 0;
@@ -57,19 +77,19 @@ int init_token_key()
 int make_session_id(char *sid)
 {
     unsigned char random[TOKEN_SESSION_LENGTH / 2];
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if(fd == -1)
+    FileDescriptor fd(open("/dev/urandom", O_RDONLY | O_CLOEXEC));
+    if (fd.get() == -1)
     {
         return -1;
     }
-    int ret = read_token_bytes(fd, random, sizeof(random));
-    close(fd);
-    if(ret != 0)
+    int ret = read_token_bytes(fd.get(), random, sizeof(random));
+
+    if (ret != 0)
     {
         return -1;
     }
     static const char hex[] = "0123456789abcdef";
-    for(size_t i = 0; i < sizeof(random); ++i)
+    for (size_t i = 0; i < sizeof(random); ++i)
     {
         sid[i * 2] = hex[random[i] >> 4];
         sid[i * 2 + 1] = hex[random[i] & 15];
@@ -78,21 +98,22 @@ int make_session_id(char *sid)
     return 0;
 }
 
-int encode(connection_t *pConnection, char *token)
+int encode(Connection *pConnection, char *token)
 {
-    if(!tokenKeyReady || strlen(pConnection->sid) != TOKEN_SESSION_LENGTH)
+    if (!tokenKeyReady || strlen(pConnection->sid) != TOKEN_SESSION_LENGTH)
     {
         return -1;
     }
     char controlFd[32];
-    int length = snprintf(controlFd, sizeof(controlFd), "%d", pConnection->netFd);
-    if(length <= 0 || length >= (int)sizeof(controlFd))
+    int length = snprintf(controlFd, sizeof(controlFd), "%d", pConnection->fd());
+    if (length <= 0 || length >= (int)sizeof(controlFd))
     {
         return -1;
     }
     char sessionKey[] = "sid";
     char controlKey[] = "control_fd";
-    struct l8w8jwt_claim claims[2] = {
+    struct l8w8jwt_claim claims[2] =
+    {
         {sessionKey, 3, pConnection->sid, TOKEN_SESSION_LENGTH, L8W8JWT_CLAIM_TYPE_STRING},
         {controlKey, 10, controlFd, (size_t)length, L8W8JWT_CLAIM_TYPE_INTEGER}
     };
@@ -105,7 +126,7 @@ int encode(connection_t *pConnection, char *token)
     params.iss = issuer;
     params.aud = audience;
     params.iat = time(NULL);
-    if(params.iat <= 0)
+    if (params.iat <= 0)
     {
         return -1;
     }
@@ -117,7 +138,7 @@ int encode(connection_t *pConnection, char *token)
     params.out = &jwt;
     params.out_length = &jwt_length;
     int ret = l8w8jwt_encode(&params);
-    if(ret != L8W8JWT_SUCCESS || jwt == NULL ||
+    if (ret != L8W8JWT_SUCCESS || jwt == NULL ||
        strnlen(jwt, PROTOCOL_TOKEN_CAPACITY) >= PROTOCOL_TOKEN_CAPACITY)
     {
         l8w8jwt_free(jwt);
@@ -134,11 +155,11 @@ static struct l8w8jwt_claim *find_token_claim(struct l8w8jwt_claim *claims,
 {
     struct l8w8jwt_claim *found = NULL;
     size_t length = strlen(key);
-    for(size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i)
     {
-        if(claims[i].key_length == length && memcmp(claims[i].key, key, length) == 0)
+        if (claims[i].key_length == length && memcmp(claims[i].key, key, length) == 0)
         {
-            if(found != NULL || claims[i].type != type || claims[i].value == NULL ||
+            if (found != NULL || claims[i].type != type || claims[i].value == NULL ||
                strlen(claims[i].value) != claims[i].value_length)
             {
                 return NULL;
@@ -151,7 +172,7 @@ static struct l8w8jwt_claim *find_token_claim(struct l8w8jwt_claim *claims,
 
 static int token_number(struct l8w8jwt_claim *claim, int64_t *value)
 {
-    if(claim == NULL || claim->value_length == 0 ||
+    if (claim == NULL || claim->value_length == 0 ||
        strspn(claim->value, "0123456789") != claim->value_length)
     {
         return -1;
@@ -159,7 +180,7 @@ static int token_number(struct l8w8jwt_claim *claim, int64_t *value)
     char *end;
     errno = 0;
     long long number = strtoll(claim->value, &end, 10);
-    if(errno != 0 || *end != '\0' || number < 0)
+    if (errno != 0 || *end != '\0' || number < 0)
     {
         return -1;
     }
@@ -167,10 +188,11 @@ static int token_number(struct l8w8jwt_claim *claim, int64_t *value)
     return 0;
 }
 
-int decode(char *user_name, char *token, clientQueue_t *pclientQueue, int *puser_id)
+// 校验 Token 签名、有效期与控制连接的会话。成功时写入用户 ID，并返回对应的状态码。
+int decode(char *user_name, char *token, const ClientManager *clients, int *puser_id)
 {
     *puser_id = -1;
-    if(!tokenKeyReady)
+    if (!tokenKeyReady)
     {
         return TOKEN_INVALID;
     }
@@ -192,12 +214,8 @@ int decode(char *user_name, char *token, clientQueue_t *pclientQueue, int *puser
     size_t count = 0;
     enum l8w8jwt_validation_result validation = L8W8JWT_VALID;
     int decoded = l8w8jwt_decode(&params, &validation, &claims, &count);
-    struct ClaimList {
-        l8w8jwt_claim *claims;
-        size_t count;
-        ~ClaimList() { l8w8jwt_free_claims(claims, count); }
-    } owner{claims, count};
-    if(decoded != L8W8JWT_SUCCESS || claims == NULL ||
+    JwtClaimsGuard owner(claims, count);
+    if (decoded != L8W8JWT_SUCCESS || claims == NULL ||
        (validation != L8W8JWT_VALID && validation != L8W8JWT_EXP_FAILURE))
     {
         return TOKEN_INVALID;
@@ -208,7 +226,7 @@ int decode(char *user_name, char *token, clientQueue_t *pclientQueue, int *puser
     struct l8w8jwt_claim *aud = find_token_claim(claims, count, "aud", L8W8JWT_CLAIM_TYPE_STRING);
     struct l8w8jwt_claim *sid = find_token_claim(claims, count, "sid", L8W8JWT_CLAIM_TYPE_STRING);
     int64_t controlFd, issuedAt, expiresAt;
-    if(alg == NULL || strcmp(alg->value, "HS512") != 0 ||
+    if (alg == NULL || strcmp(alg->value, "HS512") != 0 ||
        sub == NULL || strcmp(sub->value, user_name) != 0 ||
        iss == NULL || strcmp(iss->value, "net-disk") != 0 ||
        aud == NULL || strcmp(aud->value, "net-disk-transfer") != 0 ||
@@ -217,27 +235,27 @@ int decode(char *user_name, char *token, clientQueue_t *pclientQueue, int *puser
        token_number(find_token_claim(claims, count, "iat", L8W8JWT_CLAIM_TYPE_INTEGER), &issuedAt) != 0 ||
        token_number(find_token_claim(claims, count, "exp", L8W8JWT_CLAIM_TYPE_INTEGER), &expiresAt) != 0 ||
        issuedAt <= 0 || expiresAt <= issuedAt || expiresAt - issuedAt != TOKEN_LIFETIME ||
-       controlFd > INT_MAX || (uint64_t)controlFd >= pclientQueue->fd_capacity)
+       controlFd > INT_MAX)
     {
         return TOKEN_INVALID;
     }
     // fd 只用于定位，必须同时匹配仍登录的控制连接及随机会话标识。
-    connection_t *pControl = pclientQueue->connections[controlFd].get();
-    if(pControl == NULL || pclientQueue->client[controlFd] < 0 ||
+    const Connection *pControl = clients->find(static_cast<int>(controlFd));
+    if (pControl == NULL || pControl->userId < 0 ||
        strcmp(pControl->user_name, user_name) != 0 ||
        strcmp(pControl->sid, sid->value) != 0)
     {
         return TOKEN_INVALID;
     }
     time_t now = time(NULL);
-    if(now == (time_t)-1)
+    if (now == (time_t)-1)
     {
         return TOKEN_INVALID;
     }
-    if(validation == L8W8JWT_EXP_FAILURE || (int64_t)now >= expiresAt)
+    if (validation == L8W8JWT_EXP_FAILURE || (int64_t)now >= expiresAt)
     {
         return TOKEN_EXPIRED;
     }
-    *puser_id = pclientQueue->client[controlFd];
+    *puser_id = pControl->userId;
     return TOKEN_VALID;
 }

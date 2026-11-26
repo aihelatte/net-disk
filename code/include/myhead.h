@@ -9,7 +9,6 @@
 #include <limits.h>
 #include <mysql/mysql.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,9 +26,22 @@
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
+#include <memory>
+#include <utility>
+#include "file_descriptor.h"
 #include "protocol_validate.h"
 #include "net_io.h"
 #include "wire_order.h"
+
+namespace {
+struct FileCloser
+{
+    void operator()(FILE *file) const
+    {
+        fclose(file);
+    }
+};
+}
 
 #define ERROR_CHECK(retval, target, message) \
     do {                                      \
@@ -95,18 +107,18 @@ static inline int read_input_line(char *buf, size_t capacity)
 // 保留原配置的两行格式，缺项、非法IP或端口均返回失败
 static inline int read_tcp_address(const char *file, struct sockaddr_in *addr)
 {
-    FILE *fp = fopen(file, "r");
-    if(fp == NULL)
+    std::unique_ptr<FILE, FileCloser> fp(fopen(file, "r"));
+    if(!fp)
     {
         perror("fopen");
         return -1;
     }
     char ip[1024] = {0};
     char port[1024] = {0};
-    int valid = fgets(ip, sizeof(ip), fp) != NULL &&
-                fgets(port, sizeof(port), fp) != NULL;
+    int valid = fgets(ip, sizeof(ip), fp.get()) != NULL &&
+                fgets(port, sizeof(port), fp.get()) != NULL;
     valid = valid && strchr(ip, '\n') != NULL && strlen(port) < sizeof(port) - 1;
-    fclose(fp);
+    fp.reset();
     char *pIp = strchr(ip, '=');
     pIp = pIp == NULL ? ip : pIp + 1;
     pIp += strspn(pIp, " \t");
@@ -183,14 +195,14 @@ static inline int open_in_root(const char *root, const char *file, int flags, mo
     }
     memcpy(path, file, length + 1);
 
-    int dirFd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if(dirFd == -1)
+    FileDescriptor dirFd(open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if(dirFd.get() == -1)
     {
         return -1;
     }
-    int parentFd[sizeof(path) / 2];
+    FileDescriptor parentFd[sizeof(path) / 2];
     int depth = 0;
-    int fd = -1;
+    FileDescriptor fd;
     char *save;
     char *part = strtok_r(path, "/", &save);
     while(part != NULL)
@@ -211,8 +223,7 @@ static inline int open_in_root(const char *root, const char *file, int flags, mo
                 errno = EACCES;
                 break;
             }
-            close(dirFd);
-            dirFd = parentFd[--depth];
+            dirFd = std::move(parentFd[--depth]);
             if(next == NULL)
             {
                 errno = EISDIR;
@@ -222,7 +233,7 @@ static inline int open_in_root(const char *root, const char *file, int flags, mo
         else if(next == NULL)
         {
             // 先避免特殊文件阻塞，再检查是否为普通文件
-            fd = openat(dirFd, part, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode);
+            fd.reset(openat(dirFd.get(), part, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode));
             break;
         }
         else
@@ -232,41 +243,41 @@ static inline int open_in_root(const char *root, const char *file, int flags, mo
                 errno = ENAMETOOLONG;
                 break;
             }
-            int nextFd = openat(dirFd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if(nextFd == -1)
+            FileDescriptor nextFd(openat(dirFd.get(), part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            if(nextFd.get() == -1)
             {
                 break;
             }
-            parentFd[depth++] = dirFd;
-            dirFd = nextFd;
+            // 下钻前保存当前目录，处理 .. 时可以从栈中取回。
+            parentFd[depth++] = std::move(dirFd);
+            dirFd = std::move(nextFd);
         }
         part = next;
     }
-    if(fd != -1)
+    if(fd.get() != -1)
     {
         struct stat statbuf;
-        if(fstat(fd, &statbuf) == -1)
+        if(fstat(fd.get(), &statbuf) == -1)
         {
             int saved_errno = errno;
-            close(fd);
-            fd = -1;
+            fd.reset();
             errno = saved_errno;
         }
         else if(!S_ISREG(statbuf.st_mode))
         {
-            close(fd);
-            fd = -1;
+            fd.reset();
             errno = EINVAL;
         }
     }
     int saved_errno = errno;
-    close(dirFd);
+    dirFd.reset();
     while(depth > 0)
     {
-        close(parentFd[--depth]);
+        parentFd[--depth].reset();
     }
     errno = saved_errno;
-    return fd;
+    // 把结果 fd 交给调用方管理，各级目录 fd 已经关闭。
+    return fd.release();
 }
 
 #endif
