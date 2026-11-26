@@ -47,6 +47,8 @@ public:
     ThreadPool &operator=(const ThreadPool &) = delete;
     int start(int workerNum);
     void stop();
+    void setPrompt(const char *userName, const char *pwd);
+    void reprintPrompt();
     ~ThreadPool() { stop(); }
     TaskQueue taskQueue;
     char token[PROTOCOL_TOKEN_CAPACITY];
@@ -60,6 +62,9 @@ private:
     void work();
     bool exitFlag = false;
     bool running = false;
+    // 用户名为空表示尚未登录，两个字段都由 taskQueue.mutex 保护。
+    char promptUserName[PROTOCOL_USER_NAME_CAPACITY] = {};
+    char promptDirectory[1024] = {};
     std::vector<std::thread> workers;
 };
 

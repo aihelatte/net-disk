@@ -83,7 +83,7 @@ int Upload(int netFd, char *file, int fd, const char *md5_str)
     ret = fstat(fd, &statbuf);
     if(ret == -1)
     {
-        perror("fstat");
+        perror("\nfstat");
         return EXIT_FAILURE;
     }
     train.length = sizeof(int64_t);
@@ -115,7 +115,7 @@ int Upload(int netFd, char *file, int fd, const char *md5_str)
         {
             return EXIT_FAILURE;
         }
-        printf("\033[1;37;46m本次上传耗时%ds^_^\033[0m\n", total_time);
+        printf("\n\033[1;37;46m本次上传耗时%ds^_^\033[0m\n", total_time);
         return 0;
     }
 
@@ -172,7 +172,7 @@ int Upload(int netFd, char *file, int fd, const char *md5_str)
             p = (char*)mmap(NULL, fileSize, PROT_READ, MAP_SHARED, fd, 0);
             if(p == MAP_FAILED)
             {
-                perror("mmap");
+                perror("\nmmap");
                 return EXIT_FAILURE;
             }
         }
@@ -225,11 +225,11 @@ int Upload(int netFd, char *file, int fd, const char *md5_str)
     {
         if(total_time == TRANSFER_VERIFY_FAILED)
         {
-            fprintf(stderr, "Upload verification failed. If the file changed, remove the incomplete same-name entry before retrying.\n");
+            fprintf(stderr, "\nUpload verification failed. If the file changed, remove the incomplete same-name entry before retrying.\n");
         }
         return EXIT_FAILURE;
     }
-    printf("\033[1;37;46m本次上传耗时%ds^_^\033[0m\n",total_time);
+    printf("\n\033[1;37;46m本次上传耗时%ds^_^\033[0m\n",total_time);
     return 0;
 }
 
@@ -244,7 +244,7 @@ int Download(int sockFd)
     }
     if(dataLength == 0)
     {
-        printf("\033[1;31mWrong file name!\033[0m\n");
+        printf("\n\033[1;31mWrong file name!\033[0m\n");
         return EXIT_FAILURE;
     }
     if(dataLength < 0 || dataLength >= (int)sizeof(name) ||
@@ -277,31 +277,31 @@ int Download(int sockFd)
     FileDescriptor downloads(open("download", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if(downloads.get() == -1)
     {
-        perror("open download");
+        perror("\nopen download");
         return EXIT_FAILURE;
     }
     struct stat destination;
     if(fstatat(downloads.get(), name, &destination, AT_SYMLINK_NOFOLLOW) == 0)
     {
-        fprintf(stderr, "Download conflict: %s already exists. Rename it to download again.\n", name);
+        fprintf(stderr, "\nDownload conflict: %s already exists. Rename it to download again.\n", name);
         return EXIT_FAILURE;
     }
     if(errno != ENOENT)
     {
-        perror("stat destination");
+        perror("\nstat destination");
         return EXIT_FAILURE;
     }
 
     const char *partialDir = ".netdisk-partial";
     if(mkdirat(downloads.get(), partialDir, 0700) == -1 && errno != EEXIST)
     {
-        perror("mkdir partial");
+        perror("\nmkdir partial");
         return EXIT_FAILURE;
     }
     FileDescriptor partial(openat(downloads.get(), partialDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if(partial.get() == -1)
     {
-        perror("open partial directory");
+        perror("\nopen partial directory");
         return EXIT_FAILURE;
     }
     FileDescriptor localFile(openat(partial.get(), expectedMd5,
@@ -312,7 +312,7 @@ int Download(int sockFd)
        !S_ISREG(info.st_mode) || fstatat(partial.get(), expectedMd5, &entry, AT_SYMLINK_NOFOLLOW) == -1 ||
        entry.st_ino != info.st_ino || entry.st_dev != info.st_dev)
     {
-        fprintf(stderr, "Cannot lock partial download for %s.\n", name);
+        fprintf(stderr, "\nCannot lock partial download for %s.\n", name);
         return EXIT_FAILURE;
     }
     // 上次可能在发布后、删除临时名之前退出。已发布的文件不能再作为可写断点。
@@ -320,11 +320,11 @@ int Download(int sockFd)
     {
         if(unlinkat(partial.get(), expectedMd5, 0) == -1)
         {
-            perror("remove stale partial link");
+            perror("\nremove stale partial link");
         }
         else
         {
-            fprintf(stderr, "Recovered a published download. Retry gets %s.\n", name);
+            fprintf(stderr, "\nRecovered a published download. Retry gets %s.\n", name);
         }
         return EXIT_FAILURE;
     }
@@ -383,10 +383,10 @@ int Download(int sockFd)
     }
     if(strcasecmp(actualMd5, expectedMd5) != 0)
     {
-        fprintf(stderr, "Download checksum mismatch for %s. Retry to download again.\n", name);
+        fprintf(stderr, "\nDownload checksum mismatch for %s. Retry to download again.\n", name);
         if(ftruncate(fd, 0) == -1)
         {
-            perror("reset partial download");
+            perror("\nreset partial download");
         }
         return EXIT_FAILURE;
     }
@@ -395,19 +395,19 @@ int Download(int sockFd)
     {
         if(errno == EEXIST)
         {
-            fprintf(stderr, "Download conflict: %s already exists. Rename it to download again.\n", name);
+            fprintf(stderr, "\nDownload conflict: %s already exists. Rename it to download again.\n", name);
         }
         else
         {
-            perror("publish download");
+            perror("\npublish download");
         }
         return EXIT_FAILURE;
     }
     if(unlinkat(partial.get(), expectedMd5, 0) == -1)
     {
-        perror("download published, cannot remove partial link");
+        perror("\ndownload published, cannot remove partial link");
     }
     int total_time = time(NULL) - timeBeg;
-    printf("本次下载耗时%ds\n", total_time);
+    printf("\n本次下载耗时%ds\n", total_time);
     return wire_send_int(sockFd, total_time, MSG_NOSIGNAL) == sizeof(int) ? 0 : EXIT_FAILURE;
 }

@@ -2,7 +2,7 @@
 #include "worker.h"
 constexpr int workerCount = 3;
 static volatile sig_atomic_t exitWriteFd = -1;
-void sigFunc(int signum)
+void sigFunc(int)
 {
     int savedErrno = errno;
     while (write(exitWriteFd, "1", 1) == -1 && errno == EINTR)
@@ -10,7 +10,7 @@ void sigFunc(int signum)
     }
     errno = savedErrno;
 }
-void sigFunc2(int signum)
+void sigFunc2(int)
 {
 
 }
@@ -234,6 +234,7 @@ int main()
     {
         return EXIT_FAILURE;
     }
+    threadPool.setPrompt(uName, pwd);
 
     // 命令独立复制，Token单独共享并使用队列锁保护
     TransferTask server;
@@ -296,8 +297,7 @@ int main()
         }
         if (printPrompt)
         {
-            printf("\33[1m\33[34m[%s@ %s]: \33[0m", uName, pwd);
-            fflush(stdout);
+            threadPool.reprintPrompt();
             printPrompt = 0;
         }
         int readyNum = epoll_wait(epfd, readyArr, 4, waitTime);
@@ -361,6 +361,10 @@ int main()
                     printf("\033[1;31mCommand too long!\033[0m\n");
                     continue;
                 }
+                if (cmd[strspn(cmd, " \t")] == '\0')
+                {
+                    continue;
+                }
                 bzero(&train_state, sizeof(train_state));
                 if (strlen(cmd) < 2)
                 {
@@ -401,6 +405,7 @@ int main()
                     {
                         return EXIT_FAILURE;
                     }
+                    threadPool.setPrompt(uName, pwd);
                 }
 
                 else if (strncmp("ls", cmd, 2) == 0)
@@ -471,6 +476,7 @@ int main()
                     {
                         return EXIT_FAILURE;
                     }
+                    threadPool.setPrompt(uName, pwd);
                     printf("%s\n", pwd);
                 }
 

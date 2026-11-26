@@ -28,6 +28,7 @@ int ThreadPool::start(int workerNum)
     tokenVersion = 0;
     tokenDeadline = 0;
     token[0] = '\0';
+    promptUserName[0] = '\0';
     exitFlag = false;
     running = true;
     try
@@ -60,8 +61,7 @@ void ThreadPool::stop()
         while (!taskQueue.empty())
         {
             taskQueue.pop();
-            // 成功、失败或超时都结束一个已领取任务的计数。
-        --pendingTasks;
+            --pendingTasks;
         }
     }
     // 队列锁已释放，唤醒后工作线程可以取锁并看到退出状态。
@@ -74,6 +74,33 @@ void ThreadPool::stop()
     workers.clear();
     tokenPipe[0].reset();
     tokenPipe[1].reset();
+}
+
+// 主线程收到服务端目录后更新缓存，主线程和工作线程用它重绘提示符。
+void ThreadPool::setPrompt(const char *userName, const char *pwd)
+{
+    std::lock_guard<std::mutex> lock(taskQueue.mutex);
+    snprintf(promptUserName, sizeof(promptUserName), "%s", userName);
+    snprintf(promptDirectory, sizeof(promptDirectory), "%s", pwd);
+}
+
+// 只在锁内复制提示符，终端 I/O 放在锁外，避免阻塞任务队列。
+void ThreadPool::reprintPrompt()
+{
+    char userName[sizeof(promptUserName)];
+    char pwd[sizeof(promptDirectory)];
+    {
+        std::lock_guard<std::mutex> lock(taskQueue.mutex);
+        if (exitFlag || promptUserName[0] == '\0')
+        {
+            return;
+        }
+        memcpy(userName, promptUserName, sizeof(userName));
+        memcpy(pwd, promptDirectory, sizeof(pwd));
+    }
+    // 从当前行开头重绘，连续完成的任务不会把提示符拼在一起。
+    printf("\r\33[1m\33[34m[%s@ %s]: \33[0m\33[K", userName, pwd);
+    fflush(stdout);
 }
 
 // 循环取任务。队列状态在锁内处理，实际传输在锁外执行。
@@ -94,9 +121,12 @@ void ThreadPool::work()
             taskQueue.pop();
         }
         handle_long_cmd(&task, this);
-        std::lock_guard<std::mutex> lock(taskQueue.mutex);
-        // 成功、失败或超时都结束一个已领取任务的计数。
-        --pendingTasks;
+        {
+            std::lock_guard<std::mutex> lock(taskQueue.mutex);
+            // 成功、失败或超时都结束一个已领取任务的计数。
+            --pendingTasks;
+        }
+        reprintPrompt();
     }
 }
 
@@ -131,7 +161,7 @@ int handle_long_cmd(TransferTask *pserver, ThreadPool *pThreadPool)
     {
         if (fileFd == -1)
         {
-            perror("open");
+            perror("\nopen");
             return EXIT_FAILURE;
         }
         if (flock(fileFd, LOCK_SH | LOCK_NB) == -1 ||
@@ -144,14 +174,14 @@ int handle_long_cmd(TransferTask *pserver, ThreadPool *pThreadPool)
     unsigned long tokenVersion = 0;
     if (get_token(pThreadPool, token, &tokenVersion, 0) != 0)
     {
-        printf("Cannot obtain token, please login again.\n");
+        printf("\nCannot obtain token, please login again.\n");
         return EXIT_FAILURE;
     }
     FileDescriptor connection(socket(AF_INET, SOCK_STREAM, 0));
     int sockFd_child = connection.get();
     if (sockFd_child == -1)
     {
-        perror("socket");
+        perror("\nsocket");
         return EXIT_FAILURE;
     }
     if (tcpInit(&sockFd_child, "./config/client.conf") != 0)
@@ -192,7 +222,7 @@ int handle_long_cmd(TransferTask *pserver, ThreadPool *pThreadPool)
         if (check != TOKEN_EXPIRED || times != 0 ||
            get_token(pThreadPool, token, &tokenVersion, 1) != 0)
         {
-            printf("Token authentication failed, please login again.\n");
+            printf("\nToken authentication failed, please login again.\n");
             return EXIT_FAILURE;
         }
         ++times;// 只有明确过期才续签，最多重试一次

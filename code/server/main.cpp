@@ -301,6 +301,11 @@ int main()
                     {
                         clients.touch(netFd);
                     }
+                    if (ret == -2)
+                    {
+                        close_client_connection(netFd, epfd, &clients);
+                        continue;
+                    }
                     if (ret < 0)
                     {
                         close_invalid_connection(netFd, epfd, &clients, "incomplete or invalid message");

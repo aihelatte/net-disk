@@ -154,7 +154,8 @@ void Connection::resetRequest()
 }
 
 // 只读取当前帧所需字节，交接后的数据仍留给工作线程。
-// 返回 1 表示收到完整帧，0 表示继续等待，-1 表示连接断开或帧无效。
+// 返回 1 表示收到完整帧，0 表示继续等待。
+// 命令阶段的退出帧或帧边界 EOF 返回 -2，协议错误或异常中断返回 -1。
 int Connection::receiveRequest(bool &progress)
 {
     progress = false;
@@ -178,7 +179,11 @@ int Connection::receiveRequest(bool &progress)
                 train.length = length;
                 if (stage == RECEIVE_COMMAND)
                 {
-                    if (length <= 0 || !protocol_valid_text_length(length, sizeof(train.buf)))
+                    if (length == 0)
+                    {
+                        return -2;
+                    }
+                    if (!protocol_valid_text_length(length, sizeof(train.buf)))
                     {
                         return -1;
                     }
@@ -220,6 +225,10 @@ int Connection::receiveRequest(bool &progress)
                 return -1;
             }
             return 1;
+        }
+        if (ret == 0 && stage == RECEIVE_COMMAND && received == 0)
+        {
+            return -2;
         }
         if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
         {
